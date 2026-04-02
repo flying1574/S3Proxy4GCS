@@ -10,5 +10,8 @@ integration_tests/s3proxy4gcs_test_bin
 # Go workspace
 /vendor/
 
+# log
+log/
+
 # OS Specific
 .DS_Store
