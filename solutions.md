@@ -163,28 +163,55 @@ When deploying the proxy in a private VPC, you can choose between unencrypted HT
 
 ## Implementation Status Summary
 
+### Control Plane — XML Bi-directional Translation
+
+Bucket/Object configuration APIs intercepted by the proxy, performing S3 XML ↔ GCS SDK struct translation via `pkg/translate`.
+
+| Feature | Methods | Status | Scope |
+|---|---|---|---|
+| **Lifecycle** | PUT / GET / DELETE | ✅ Implemented | S3 XML ↔ GCS JSON, unsupported filter rejection (Size/Tags) |
+| **CORS** | PUT / GET / DELETE | ✅ Implemented | S3 XML ↔ GCS CORS struct translation |
+| **Logging** | PUT / GET / DELETE | ✅ Implemented | S3 XML ↔ GCS BucketLogging |
+| **Website** | PUT / GET / DELETE | ✅ Implemented | IndexDocument / ErrorDocument mapping |
+| **Tagging** | PUT / GET / DELETE | ✅ Implemented | GCS object metadata with OCC (IfMetagenerationMatch) |
+| **ACLs & Policies** | — | ⏸ Deferred | IAM model mismatch, recommend prefix-based security |
+
+### Data Plane — Reverse Proxy & Header Rewriting
+
+All standard S3 object operations streamed through `httputil.ReverseProxy` with automatic header/query transformation.
+
 | Feature | Status | Scope |
 |---|---|---|
-| **Lifecycle** (PUT/GET/DELETE) | ✅ Implemented | Bi-directional S3 XML ↔ GCS JSON, unsupported filter rejection |
-| **CORS** (PUT/GET/DELETE) | ✅ Implemented | S3 XML ↔ GCS CORS struct translation |
-| **Logging** (PUT/GET/DELETE) | ✅ Implemented | S3 XML ↔ GCS BucketLogging |
-| **Website** (PUT/GET/DELETE) | ✅ Implemented | IndexDocument/ErrorDocument mapping |
-| **Tagging** (PUT/GET/DELETE) | ✅ Implemented | GCS metadata with OCC (IfMetagenerationMatch) |
-| **Storage Class Translation** | ✅ Implemented | STANDARD_IA→NEARLINE, GLACIER→ARCHIVE, etc. |
-| **Versioning Interop** | ✅ Implemented | x-goog-generation ↔ x-amz-version-id mapping |
+| **Reverse Proxy (Streaming)** | ✅ Implemented | High-performance streaming with tuned connection pooling |
+| **Storage Class Translation** | ✅ Implemented | STANDARD_IA→NEARLINE, GLACIER→ARCHIVE, INTELLIGENT_TIERING→AUTOCLASS, etc. |
+| **Versioning Interop** | ✅ Implemented | x-goog-generation ↔ x-amz-version-id bi-directional mapping |
 | **SigV4 Re-signing** | ✅ Implemented | Automatic re-sign on header/query modification |
-| **Reverse Proxy (Data Plane)** | ✅ Implemented | Streaming proxy with connection pooling |
-| **Observability** | ✅ Implemented | Prometheus metrics, structured JSON logging (slog), /health, /readyz |
-| **DryRun Mode** | ✅ Implemented | Local dev without real GCS hits |
-| **Graceful Shutdown** | ✅ Implemented | SIGTERM/SIGINT with 10s drain |
-| **Unit Tests** | ✅ Implemented | 17 tests across all translate modules |
-| **Integration Tests** | ✅ Implemented | Isolated Go module, auto-spawns local proxy |
-| **E2E Acceptance Tests** | ✅ Implemented | Functional + Stability + Benchmark suites |
-| **CI/CD (GitHub Actions)** | ✅ Implemented | Manual-trigger workflow with 3 parallel jobs |
-| **ACLs & Policies** | ⏸ Deferred | IAM model mismatch, recommend prefix-based security |
+| **x-id Stripping** | ✅ Implemented | Remove AWS SDK v2 tracking query parameter |
 | **DeleteObjects (Bulk)** | ⏸ Deferred | Fan-out resource exhaustion risk |
-| **Inventory Manifests** | ⏸ Deferred | Requires external stateful ETL worker |
 | **Flexible Checksums** | ⏸ Deferred | Client-side `WHEN_REQUIRED` workaround available |
+| **Inventory Manifests** | ⏸ Deferred | Requires external stateful ETL worker |
+
+### Operations Plane — Observability & Reliability
+
+Health probes, metrics, logging infrastructure, and operational safeguards.
+
+| Feature | Status | Scope |
+|---|---|---|
+| **Health Check** (`/health`) | ✅ Implemented | Lightweight liveness probe |
+| **Readiness Probe** (`/readyz`) | ✅ Implemented | GCS connectivity test (Bucket.Attrs) |
+| **Prometheus Metrics** (`/metrics`) | ✅ Implemented | http_requests_total, request_duration, gcs_api_duration |
+| **Structured JSON Logging** | ✅ Implemented | Go 1.21 `slog` with semantic levels + request_id tracing |
+| **Graceful Shutdown** | ✅ Implemented | SIGTERM/SIGINT with 10s drain |
+| **DryRun Mode** | ✅ Implemented | Local dev without real GCS hits |
+
+### Quality Assurance & CI/CD
+
+| Layer | Status | Scope |
+|---|---|---|
+| **Unit Tests** | ✅ Implemented | 17 tests across all `pkg/translate` modules |
+| **Integration Tests** | ✅ Implemented | Isolated Go module, auto-spawns local proxy in DryRun |
+| **E2E Acceptance Tests** | ✅ Implemented | Functional + Stability + Benchmark suites against live proxy |
+| **CI/CD (GitHub Actions)** | ✅ Implemented | Manual-trigger workflow with 3 parallel jobs |
 
 ---
 
