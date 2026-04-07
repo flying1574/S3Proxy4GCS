@@ -52,17 +52,17 @@ These features are infrequent bucket management API calls. The proxy only needs 
 
 #### 1. Static Website Configuration
 **Decision**: Stateless configuration mapping.
-- **CORS**: **[Implemented]** Translate `CORSConfiguration` XML to GCS CORS JSON bucket settings.
-- **Logging**: **[Implemented]** Map S3 bucket logging to GCS TargetBucket/Prefix using Go SDK.
-- **Website**: **[Implemented]** Map `IndexDocument`/`ErrorDocument` to GCS website fields.
+- **CORS**: **[Implemented ✅]** Translate `CORSConfiguration` XML to GCS CORS JSON bucket settings. Full PUT/GET/DELETE CRUD with bi-directional translation.
+- **Logging**: **[Implemented ✅]** Map S3 bucket logging to GCS TargetBucket/Prefix using Go SDK. Full PUT/GET/DELETE CRUD.
+- **Website**: **[Implemented ✅]** Map `IndexDocument`/`ErrorDocument` to GCS website fields. Full PUT/GET/DELETE CRUD.
 
-#### 2. Lifecycle Management
-**Decision**: **Translation Layer**. The proxy intercepts `PUT /?lifecycle` and maps S3 actions (Expiration, Transition) to GCS Bucket Lifecycle configuration. This is a purely stateless translation with negligible resource needs.
+#### 2. Lifecycle Management — **[Implemented ✅]**
+**Decision**: **Translation Layer**. The proxy intercepts `PUT/GET/DELETE /?lifecycle` and maps S3 actions (Expiration, Transition) to GCS Bucket Lifecycle configuration. Bi-directional translation (S3 XML ↔ GCS JSON) with full CRUD support. Rejects unsupported filters (Size, Tags) to prevent scope broadening.
 
 ### Group B: Data-Plane & Stateful Operations (Hard / High Impact)
 These features intercept high-frequency data path operations or require heavy background processing. They introduce significant latency, require high proxy resources (memory/connections), or involve complex race conditions.
 
-#### 1. Tagging (Object Tagging) - **[Implemented]**
+#### 1. Tagging (Object Tagging) — **[Implemented ✅]**
 **Issue**: GCS lacks an exact `?tagging` equivalent and relies on object metadata. 
 **Implementation**: The Proxy transparently translates `PUT ?tagging` requests directly into GCS Object Custom Metadata (`x-goog-meta-s3tag-`). It uses a read-modify-write cycle with **Optimistic Concurrency Control (IfMetagenerationMatch)** to prevent lost updates safely without heavy locking.
 
@@ -161,10 +161,39 @@ When deploying the proxy in a private VPC, you can choose between unencrypted HT
 
 ---
 
+## Implementation Status Summary
+
+| Feature | Status | Scope |
+|---|---|---|
+| **Lifecycle** (PUT/GET/DELETE) | ✅ Implemented | Bi-directional S3 XML ↔ GCS JSON, unsupported filter rejection |
+| **CORS** (PUT/GET/DELETE) | ✅ Implemented | S3 XML ↔ GCS CORS struct translation |
+| **Logging** (PUT/GET/DELETE) | ✅ Implemented | S3 XML ↔ GCS BucketLogging |
+| **Website** (PUT/GET/DELETE) | ✅ Implemented | IndexDocument/ErrorDocument mapping |
+| **Tagging** (PUT/GET/DELETE) | ✅ Implemented | GCS metadata with OCC (IfMetagenerationMatch) |
+| **Storage Class Translation** | ✅ Implemented | STANDARD_IA→NEARLINE, GLACIER→ARCHIVE, etc. |
+| **Versioning Interop** | ✅ Implemented | x-goog-generation ↔ x-amz-version-id mapping |
+| **SigV4 Re-signing** | ✅ Implemented | Automatic re-sign on header/query modification |
+| **Reverse Proxy (Data Plane)** | ✅ Implemented | Streaming proxy with connection pooling |
+| **Observability** | ✅ Implemented | Prometheus metrics, structured JSON logging (slog), /health, /readyz |
+| **DryRun Mode** | ✅ Implemented | Local dev without real GCS hits |
+| **Graceful Shutdown** | ✅ Implemented | SIGTERM/SIGINT with 10s drain |
+| **Unit Tests** | ✅ Implemented | 17 tests across all translate modules |
+| **Integration Tests** | ✅ Implemented | Isolated Go module, auto-spawns local proxy |
+| **E2E Acceptance Tests** | ✅ Implemented | Functional + Stability + Benchmark suites |
+| **CI/CD (GitHub Actions)** | ✅ Implemented | Manual-trigger workflow with 3 parallel jobs |
+| **ACLs & Policies** | ⏸ Deferred | IAM model mismatch, recommend prefix-based security |
+| **DeleteObjects (Bulk)** | ⏸ Deferred | Fan-out resource exhaustion risk |
+| **Inventory Manifests** | ⏸ Deferred | Requires external stateful ETL worker |
+| **Flexible Checksums** | ⏸ Deferred | Client-side `WHEN_REQUIRED` workaround available |
+
+---
+
 ## Open Questions & Next Steps
 
 1. **Target SDKs Compatibility**: The target SDKs are **Go, Java, Python, and C++**. We must ensure the proxy's XML formatting strictly adheres to what these specific SDKs expect (e.g., namespace prefixes, exact header values).
 2. **Consistency Requirements**: For features like Tagging via Metadata, is the eventual consistency of GCS metadata acceptable for the customer's application logic?
+3. **Performance Hardening**: Consider implementing request body size limits (`MaxBytesReader`), server-level timeouts, and concurrency limiting middleware.
+4. **E2E Validation**: Run the E2E acceptance test suite against a live GKE deployment to validate all translations end-to-end.
 
 ---
 
