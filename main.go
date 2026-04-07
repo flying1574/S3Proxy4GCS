@@ -26,6 +26,8 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/api/option"
 )
 
@@ -33,6 +35,37 @@ var gcsClient *storage.Client
 var gcsCtx context.Context
 var reverseProxy *httputil.ReverseProxy
 var gcsURL *url.URL
+
+// Prometheus metrics
+var (
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "s3proxy_http_requests_total",
+			Help: "Total number of HTTP requests processed.",
+		},
+		[]string{"method", "handler", "status"},
+	)
+	httpRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "s3proxy_http_request_duration_seconds",
+			Help:    "HTTP request duration in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "handler"},
+	)
+	gcsAPIDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "s3proxy_gcs_api_duration_seconds",
+			Help:    "GCS API call duration in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"operation"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(httpRequestsTotal, httpRequestDuration, gcsAPIDuration)
+}
 
 func main() {
 	// Initialize configuration
@@ -198,14 +231,41 @@ func main() {
 	r := chi.NewRouter()
 
 	// Base middlewares
-	r.Use(middleware.Logger)
+	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
+	r.Use(observabilityMiddleware)
 
-	// API Handlers
+	// Operational endpoints (excluded from S3 routing)
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
+
+	r.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if config.Config.DryRun {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"ready","mode":"dry_run"}`))
+			return
+		}
+		if gcsClient == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"not_ready","reason":"gcs_client_nil"}`))
+			return
+		}
+		// Lightweight check: fetch bucket attrs to verify connectivity
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		_, err := gcsClient.Bucket(config.Config.TargetBucket).Attrs(ctx)
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(fmt.Sprintf(`{"status":"not_ready","reason":"%v"}`, err)))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ready","mode":"live"}`))
+	})
+
+	r.Handle("/metrics", promhttp.Handler())
 
 	// Pass-through or intercept handlers
 	r.Route("/", func(r chi.Router) {
@@ -251,8 +311,83 @@ func main() {
 	}
 }
 
+// statusRecorder wraps http.ResponseWriter to capture the status code.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// observabilityMiddleware replaces chi's default Logger middleware with structured
+// JSON logging that includes request_id, method, path, status, duration, and body size.
+// It also records Prometheus metrics for every request.
+func observabilityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+		next.ServeHTTP(rec, r)
+
+		duration := time.Since(start)
+		reqID := middleware.GetReqID(r.Context())
+
+		// Determine handler label for metrics
+		handlerLabel := "proxy"
+		q := r.URL.Query()
+		for _, key := range []string{"lifecycle", "cors", "logging", "website", "tagging"} {
+			if _, ok := q[key]; ok {
+				handlerLabel = key
+				break
+			}
+		}
+
+		statusStr := strconv.Itoa(rec.status)
+		httpRequestsTotal.WithLabelValues(r.Method, handlerLabel, statusStr).Inc()
+		httpRequestDuration.WithLabelValues(r.Method, handlerLabel).Observe(duration.Seconds())
+
+		slog.Info("HTTP request completed",
+			"request_id", reqID,
+			"method", r.Method,
+			"uri", r.RequestURI,
+			"status", rec.status,
+			"duration_ms", duration.Milliseconds(),
+			"content_length", r.ContentLength,
+			"handler", handlerLabel,
+		)
+	})
+}
+
+// reqLogger returns a slog.Logger enriched with the request_id from context.
+func reqLogger(ctx context.Context) *slog.Logger {
+	reqID := middleware.GetReqID(ctx)
+	if reqID == "" {
+		return slog.Default()
+	}
+	return slog.Default().With("request_id", reqID)
+}
+
+// timeGCSCall executes a GCS SDK call, logs and records its duration.
+func timeGCSCall(ctx context.Context, operation string, fn func() error) error {
+	start := time.Now()
+	err := fn()
+	duration := time.Since(start)
+	gcsAPIDuration.WithLabelValues(operation).Observe(duration.Seconds())
+	log := reqLogger(ctx)
+	if err != nil {
+		log.Error("GCS API call failed", "operation", operation, "duration_ms", duration.Milliseconds(), "error", err)
+	} else {
+		log.Info("GCS API call succeeded", "operation", operation, "duration_ms", duration.Milliseconds())
+	}
+	return err
+}
+
 func handleS3Request(w http.ResponseWriter, r *http.Request) {
-	slog.Info("Received S3 Request", "method", r.Method, "uri", r.RequestURI)
+	log := reqLogger(r.Context())
+	log.Info("Received S3 Request", "method", r.Method, "uri", r.RequestURI)
 
 	hasQueryParam := func(key string) bool {
 		for k := range r.URL.Query() {
@@ -363,18 +498,21 @@ func (t *dryRunTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func handlePutLifecycle(w http.ResponseWriter, r *http.Request) {
+	log := reqLogger(r.Context())
+
 	// 1. Read body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to read request body.")
 		return
 	}
 	defer r.Body.Close()
+	log.Info("Read lifecycle request body", "body_size", len(body))
 
 	// 2. Parse S3 XML
 	var s3Cfg translate.LifecycleConfiguration
 	if err := xml.Unmarshal(body, &s3Cfg); err != nil {
-		slog.Error("Failed to unmarshal S3 XML for Lifecycle", "error", err)
+		log.Error("Failed to unmarshal S3 XML for Lifecycle", "error", err)
 		writeS3Error(w, http.StatusBadRequest, "MalformedXML", "The XML you provided was not well-formed or did not validate against our published schema.")
 		return
 	}
@@ -382,7 +520,7 @@ func handlePutLifecycle(w http.ResponseWriter, r *http.Request) {
 	// 3. Translate to GCS JSON
 	gcsJSON, err := translate.TranslateS3ToGCS(&s3Cfg)
 	if err != nil {
-		slog.Error("Failed to translate to GCS JSON for Lifecycle", "error", err)
+		log.Error("Failed to translate to GCS JSON for Lifecycle", "error", err)
 		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Lifecycle translation failed.")
 		return
 	}
@@ -398,8 +536,8 @@ func handlePutLifecycle(w http.ResponseWriter, r *http.Request) {
 	// 5. Unmarshal translated GCS JSON back into storage.Lifecycle interface if we want to use BucketHandle.Update
 	var storageLifecycle storage.Lifecycle
 	if err := json.Unmarshal(gcsJSON, &storageLifecycle); err != nil {
-		slog.Error("Failed to unmarshal translated JSON into storage.Lifecycle", "error", err)
-		http.Error(w, "Internal translation error mapping to Go SDK", http.StatusInternalServerError)
+		log.Error("Failed to unmarshal translated JSON into storage.Lifecycle", "error", err)
+		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Internal translation error mapping to Go SDK.")
 		return
 	}
 
@@ -409,23 +547,29 @@ func handlePutLifecycle(w http.ResponseWriter, r *http.Request) {
 		Lifecycle: &storageLifecycle,
 	}
 
-	_, err = bucket.Update(r.Context(), uattrs)
+	err = timeGCSCall(r.Context(), "PutBucketLifecycle", func() error {
+		_, e := bucket.Update(r.Context(), uattrs)
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to update GCS bucket lifecycle", "bucket", config.Config.TargetBucket, "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error: %v", err), http.StatusBadGateway)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
-	slog.Info("Successfully updated GCS bucket lifecycle", "bucket", config.Config.TargetBucket)
+	log.Info("Successfully updated GCS bucket lifecycle", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Successfully proxied and applied lifecycle to GCS."))
 }
 
 func handleGetLifecycle(w http.ResponseWriter, r *http.Request) {
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
-	attrs, err := bucket.Attrs(r.Context())
+	var attrs *storage.BucketAttrs
+	err := timeGCSCall(r.Context(), "GetBucketLifecycle", func() error {
+		var e error
+		attrs, e = bucket.Attrs(r.Context())
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to fetch GCS bucket attributes for Lifecycle", "bucket", config.Config.TargetBucket, "error", err)
 		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
@@ -442,35 +586,41 @@ func handleGetLifecycle(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDeleteLifecycle(w http.ResponseWriter, r *http.Request) {
+	log := reqLogger(r.Context())
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
 	uattrs := storage.BucketAttrsToUpdate{
 		Lifecycle: &storage.Lifecycle{Rules: nil},
 	}
 
-	_, err := bucket.Update(r.Context(), uattrs)
+	err := timeGCSCall(r.Context(), "DeleteBucketLifecycle", func() error {
+		_, e := bucket.Update(r.Context(), uattrs)
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to reset GCS bucket lifecycle", "bucket", config.Config.TargetBucket, "error", err)
 		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
-	slog.Info("Successfully deleted GCS bucket lifecycle", "bucket", config.Config.TargetBucket)
+	log.Info("Successfully deleted GCS bucket lifecycle", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func handlePutCORS(w http.ResponseWriter, r *http.Request) {
+	log := reqLogger(r.Context())
+
 	// 1. Read body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to read request body.")
 		return
 	}
 	defer r.Body.Close()
+	log.Info("Read CORS request body", "body_size", len(body))
 
 	// 2. Parse S3 XML
 	var s3Cfg translate.CORSConfiguration
 	if err := xml.Unmarshal(body, &s3Cfg); err != nil {
-		slog.Error("Failed to unmarshal S3 XML for CORS", "error", err)
+		log.Error("Failed to unmarshal S3 XML for CORS", "error", err)
 		writeS3Error(w, http.StatusBadRequest, "MalformedXML", "The XML you provided was not well-formed or did not validate against our published schema.")
 		return
 	}
@@ -491,24 +641,30 @@ func handlePutCORS(w http.ResponseWriter, r *http.Request) {
 		CORS: gcsCORS,
 	}
 
-	_, err = bucket.Update(r.Context(), uattrs)
+	err = timeGCSCall(r.Context(), "PutBucketCors", func() error {
+		_, e := bucket.Update(r.Context(), uattrs)
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to update GCS bucket CORS", "bucket", config.Config.TargetBucket, "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error: %v", err), http.StatusBadGateway)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
-	slog.Info("Successfully updated GCS bucket CORS", "bucket", config.Config.TargetBucket)
+	log.Info("Successfully updated GCS bucket CORS", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Successfully proxied and applied CORS to GCS."))
 }
 
 func handleGetCORS(w http.ResponseWriter, r *http.Request) {
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
-	attrs, err := bucket.Attrs(r.Context())
+	var attrs *storage.BucketAttrs
+	err := timeGCSCall(r.Context(), "GetBucketCors", func() error {
+		var e error
+		attrs, e = bucket.Attrs(r.Context())
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to fetch GCS bucket attributes for CORS", "bucket", config.Config.TargetBucket, "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error: %v", err), http.StatusBadGateway)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
@@ -523,73 +679,80 @@ func handleGetCORS(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDeleteCORS(w http.ResponseWriter, r *http.Request) {
+	log := reqLogger(r.Context())
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
 	uattrs := storage.BucketAttrsToUpdate{
 		CORS: []storage.CORS{},
 	}
 
-	_, err := bucket.Update(r.Context(), uattrs)
+	err := timeGCSCall(r.Context(), "DeleteBucketCors", func() error {
+		_, e := bucket.Update(r.Context(), uattrs)
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to reset GCS bucket CORS", "bucket", config.Config.TargetBucket, "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error deleting CORS: %v", err), http.StatusBadGateway)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
-	slog.Info("Successfully deleted GCS bucket CORS", "bucket", config.Config.TargetBucket)
+	log.Info("Successfully deleted GCS bucket CORS", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func handlePutLogging(w http.ResponseWriter, r *http.Request) {
-	// 1. Read body
+	log := reqLogger(r.Context())
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to read request body.")
 		return
 	}
 	defer r.Body.Close()
+	log.Info("Read logging request body", "body_size", len(body))
 
-	// 2. Parse S3 XML
 	var s3Cfg translate.BucketLoggingStatus
 	if err := xml.Unmarshal(body, &s3Cfg); err != nil {
-		slog.Error("Failed to unmarshal S3 XML for Logging", "error", err)
+		log.Error("Failed to unmarshal S3 XML for Logging", "error", err)
 		writeS3Error(w, http.StatusBadRequest, "MalformedXML", "The XML you provided was not well-formed or did not validate against our published schema.")
 		return
 	}
 
-	// 3. Translate to GCS Logging
 	gcsLogging := translate.TranslateS3ToGCSLogging(s3Cfg)
 
-	// 4. In DryRun mode, just print/return success
 	if config.Config.DryRun {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Successfully proxied Logging to GCS (DryRun - no real hits)."))
 		return
 	}
 
-	// 5. Execute Bucket Update via GCS SDK
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
 	uattrs := storage.BucketAttrsToUpdate{
 		Logging: gcsLogging,
 	}
 
-	_, err = bucket.Update(r.Context(), uattrs)
+	err = timeGCSCall(r.Context(), "PutBucketLogging", func() error {
+		_, e := bucket.Update(r.Context(), uattrs)
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to update GCS bucket Logging", "bucket", config.Config.TargetBucket, "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error: %v", err), http.StatusBadGateway)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
-	slog.Info("Successfully updated GCS bucket Logging", "bucket", config.Config.TargetBucket)
+	log.Info("Successfully updated GCS bucket Logging", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Successfully proxied and applied Logging to GCS."))
 }
 
 func handleGetLogging(w http.ResponseWriter, r *http.Request) {
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
-	attrs, err := bucket.Attrs(r.Context())
+	var attrs *storage.BucketAttrs
+	err := timeGCSCall(r.Context(), "GetBucketLogging", func() error {
+		var e error
+		attrs, e = bucket.Attrs(r.Context())
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to fetch GCS bucket attributes for Logging", "bucket", config.Config.TargetBucket, "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error: %v", err), http.StatusBadGateway)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
@@ -600,72 +763,79 @@ func handleGetLogging(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDeleteLogging(w http.ResponseWriter, r *http.Request) {
+	log := reqLogger(r.Context())
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
 	uattrs := storage.BucketAttrsToUpdate{
 		Logging: &storage.BucketLogging{},
 	}
 
-	_, err := bucket.Update(r.Context(), uattrs)
+	err := timeGCSCall(r.Context(), "DeleteBucketLogging", func() error {
+		_, e := bucket.Update(r.Context(), uattrs)
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to reset GCS bucket Logging", "bucket", config.Config.TargetBucket, "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error deleting Logging: %v", err), http.StatusBadGateway)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
-	slog.Info("Successfully deleted GCS bucket Logging", "bucket", config.Config.TargetBucket)
+	log.Info("Successfully deleted GCS bucket Logging", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func handlePutWebsite(w http.ResponseWriter, r *http.Request) {
-	// 1. Read body
+	log := reqLogger(r.Context())
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to read request body.")
 		return
 	}
 	defer r.Body.Close()
+	log.Info("Read website request body", "body_size", len(body))
 
-	// 2. Parse S3 XML
 	var s3Cfg translate.WebsiteConfiguration
 	if err := xml.Unmarshal(body, &s3Cfg); err != nil {
-		slog.Error("Failed to unmarshal S3 XML for Website", "error", err)
+		log.Error("Failed to unmarshal S3 XML for Website", "error", err)
 		writeS3Error(w, http.StatusBadRequest, "MalformedXML", "The XML you provided was not well-formed or did not validate against our published schema.")
 		return
 	}
 
-	// 3. Translate to GCS Website
 	gcsWebsite := translate.TranslateS3ToGCSWebsite(s3Cfg)
 
-	// 4. In DryRun mode, just print/return success
 	if config.Config.DryRun {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Successfully proxied Website to GCS (DryRun - no real hits)."))
 		return
 	}
 
-	// 5. Execute Bucket Update via GCS SDK
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
 	uattrs := storage.BucketAttrsToUpdate{
 		Website: gcsWebsite,
 	}
 
-	_, err = bucket.Update(r.Context(), uattrs)
+	err = timeGCSCall(r.Context(), "PutBucketWebsite", func() error {
+		_, e := bucket.Update(r.Context(), uattrs)
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to update GCS bucket Website", "bucket", config.Config.TargetBucket, "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error: %v", err), http.StatusBadGateway)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
-	slog.Info("Successfully updated GCS bucket Website", "bucket", config.Config.TargetBucket)
+	log.Info("Successfully updated GCS bucket Website", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Successfully proxied and applied Website to GCS."))
 }
 
 func handleGetWebsite(w http.ResponseWriter, r *http.Request) {
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
-	attrs, err := bucket.Attrs(r.Context())
+	var attrs *storage.BucketAttrs
+	err := timeGCSCall(r.Context(), "GetBucketWebsite", func() error {
+		var e error
+		attrs, e = bucket.Attrs(r.Context())
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to fetch GCS bucket attributes for Website", "bucket", config.Config.TargetBucket, "error", err)
 		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
@@ -682,85 +852,89 @@ func handleGetWebsite(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDeleteWebsite(w http.ResponseWriter, r *http.Request) {
+	log := reqLogger(r.Context())
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
 	uattrs := storage.BucketAttrsToUpdate{
 		Website: &storage.BucketWebsite{},
 	}
 
-	_, err := bucket.Update(r.Context(), uattrs)
+	err := timeGCSCall(r.Context(), "DeleteBucketWebsite", func() error {
+		_, e := bucket.Update(r.Context(), uattrs)
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to reset GCS bucket Website", "bucket", config.Config.TargetBucket, "error", err)
 		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
-	slog.Info("Successfully deleted GCS bucket Website", "bucket", config.Config.TargetBucket)
+	log.Info("Successfully deleted GCS bucket Website", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func handlePutObjectTagging(w http.ResponseWriter, r *http.Request) {
-	// 1. Read body
+	log := reqLogger(r.Context())
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to read request body.")
 		return
 	}
 	defer r.Body.Close()
+	log.Info("Read tagging request body", "body_size", len(body))
 
-	// 2. Parse S3 XML
 	var s3Cfg translate.Tagging
 	if err := xml.Unmarshal(body, &s3Cfg); err != nil {
-		slog.Error("Failed to unmarshal S3 XML for Tagging", "error", err)
+		log.Error("Failed to unmarshal S3 XML for Tagging", "error", err)
 		writeS3Error(w, http.StatusBadRequest, "MalformedXML", "The XML you provided was not well-formed or did not validate against our published schema.")
 		return
 	}
 
-	// Determine target bucket and object from URL path (e.g., /test-bucket/object-path)
 	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(pathParts) < 2 || pathParts[0] == "" || pathParts[1] == "" {
-		http.Error(w, "Bucket and Object name required", http.StatusBadRequest)
+		writeS3Error(w, http.StatusBadRequest, "InvalidArgument", "Bucket and Object name required.")
 		return
 	}
 	targetBucket := pathParts[0]
 	targetObject := strings.Join(pathParts[1:], "/")
 
-	slog.Info("Applying Tagging to GCS Object", "bucket", targetBucket, "object", targetObject)
+	log.Info("Applying Tagging to GCS Object", "bucket", targetBucket, "object", targetObject)
 
 	if config.Config.DryRun {
-		slog.Info("[DRY_RUN] Would apply Tagging to GCS Object", "bucket", targetBucket, "object", targetObject)
+		log.Info("[DRY_RUN] Would apply Tagging to GCS Object", "bucket", targetBucket, "object", targetObject)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Successfully proxied Tagging to GCS (DryRun - no real hits)."))
 		return
 	}
 
-	// 3. Fetch existing object metadata for read-modify-write
 	obj := gcsClient.Bucket(targetBucket).Object(targetObject)
-	attrs, err := obj.Attrs(r.Context())
+	var attrs *storage.ObjectAttrs
+	err = timeGCSCall(r.Context(), "GetObjectAttrs_Tagging", func() error {
+		var e error
+		attrs, e = obj.Attrs(r.Context())
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to fetch object attributes for read-modify-write", "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error fetching attributes: %v", err), http.StatusNotFound) // Use NotFound for safety or Internal
+		writeS3Error(w, http.StatusNotFound, "NoSuchKey", fmt.Sprintf("GCS API error fetching attributes: %v", err))
 		return
 	}
 
-	// 4. Translate via gcs_tagging.go
 	updateMetadata := translate.TranslateS3ToGCSTagging(s3Cfg, attrs.Metadata)
-
 	uattrs := storage.ObjectAttrsToUpdate{
 		Metadata: updateMetadata,
 	}
 
-	// 5. Update Object using OCC via IfMetagenerationMatch
-	_, err = obj.If(storage.Conditions{
-		MetagenerationMatch: attrs.Metageneration,
-	}).Update(r.Context(), uattrs)
-
+	err = timeGCSCall(r.Context(), "PutObjectTagging", func() error {
+		_, e := obj.If(storage.Conditions{
+			MetagenerationMatch: attrs.Metageneration,
+		}).Update(r.Context(), uattrs)
+		return e
+	})
 	if err != nil {
-		slog.Error("GCS API error applying Tagging", "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error: %v (OCC conflict if 412)", err), http.StatusInternalServerError)
+		writeS3Error(w, http.StatusInternalServerError, "InternalError", fmt.Sprintf("GCS API error: %v (OCC conflict if 412)", err))
 		return
 	}
 
-	slog.Info("Successfully updated GCS Object Tagging", "bucket", targetBucket, "object", targetObject)
+	log.Info("Successfully updated GCS Object Tagging", "bucket", targetBucket, "object", targetObject)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Successfully proxied and applied Tagging to GCS."))
 }
@@ -768,17 +942,21 @@ func handlePutObjectTagging(w http.ResponseWriter, r *http.Request) {
 func handleGetObjectTagging(w http.ResponseWriter, r *http.Request) {
 	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(pathParts) < 2 || pathParts[0] == "" || pathParts[1] == "" {
-		http.Error(w, "Bucket and Object name required", http.StatusBadRequest)
+		writeS3Error(w, http.StatusBadRequest, "InvalidArgument", "Bucket and Object name required.")
 		return
 	}
 	targetBucket := pathParts[0]
 	targetObject := strings.Join(pathParts[1:], "/")
 
 	obj := gcsClient.Bucket(targetBucket).Object(targetObject)
-	attrs, err := obj.Attrs(r.Context())
+	var attrs *storage.ObjectAttrs
+	err := timeGCSCall(r.Context(), "GetObjectAttrs_GetTagging", func() error {
+		var e error
+		attrs, e = obj.Attrs(r.Context())
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to fetch GCS Object attributes for GetTagging", "bucket", targetBucket, "object", targetObject, "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error fetching attributes: %v", err), http.StatusNotFound)
+		writeS3Error(w, http.StatusNotFound, "NoSuchKey", fmt.Sprintf("GCS API error fetching attributes: %v", err))
 		return
 	}
 
@@ -789,19 +967,25 @@ func handleGetObjectTagging(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDeleteObjectTagging(w http.ResponseWriter, r *http.Request) {
+	log := reqLogger(r.Context())
+
 	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(pathParts) < 2 || pathParts[0] == "" || pathParts[1] == "" {
-		http.Error(w, "Bucket and Object name required", http.StatusBadRequest)
+		writeS3Error(w, http.StatusBadRequest, "InvalidArgument", "Bucket and Object name required.")
 		return
 	}
 	targetBucket := pathParts[0]
 	targetObject := strings.Join(pathParts[1:], "/")
 
 	obj := gcsClient.Bucket(targetBucket).Object(targetObject)
-	attrs, err := obj.Attrs(r.Context())
+	var attrs *storage.ObjectAttrs
+	err := timeGCSCall(r.Context(), "GetObjectAttrs_DeleteTagging", func() error {
+		var e error
+		attrs, e = obj.Attrs(r.Context())
+		return e
+	})
 	if err != nil {
-		slog.Error("Failed to fetch GCS Object attributes for DeleteTagging", "bucket", targetBucket, "object", targetObject, "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error: %v", err), http.StatusNotFound)
+		writeS3Error(w, http.StatusNotFound, "NoSuchKey", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
@@ -816,17 +1000,18 @@ func handleDeleteObjectTagging(w http.ResponseWriter, r *http.Request) {
 		Metadata: updateMetadata,
 	}
 
-	_, err = obj.If(storage.Conditions{
-		MetagenerationMatch: attrs.Metageneration,
-	}).Update(r.Context(), uattrs)
-
+	err = timeGCSCall(r.Context(), "DeleteObjectTagging", func() error {
+		_, e := obj.If(storage.Conditions{
+			MetagenerationMatch: attrs.Metageneration,
+		}).Update(r.Context(), uattrs)
+		return e
+	})
 	if err != nil {
-		slog.Error("GCS API error deleting Object Tagging", "bucket", targetBucket, "object", targetObject, "error", err)
-		http.Error(w, fmt.Sprintf("GCS API error: %v", err), http.StatusInternalServerError)
+		writeS3Error(w, http.StatusInternalServerError, "InternalError", fmt.Sprintf("GCS API error: %v", err))
 		return
 	}
 
-	slog.Info("Successfully deleted GCS Object Tagging", "bucket", targetBucket, "object", targetObject)
+	log.Info("Successfully deleted GCS Object Tagging", "bucket", targetBucket, "object", targetObject)
 	w.WriteHeader(http.StatusNoContent)
 }
 
