@@ -86,11 +86,88 @@ func createS3Client() (*s3.Client, error) {
 }
 ```
 
+## Architecture
+
+```mermaid
+graph TB
+    Client["S3 Client<br/>(AWS SDK / CLI)"]
+
+    subgraph Proxy["S3Proxy4GCS (Chi Router :8080)"]
+        direction TB
+
+        MW["Middleware Chain<br/>RequestID → Recoverer → Observability"]
+
+        subgraph Ops["Operational Endpoints"]
+            Health["/health"]
+            Readyz["/readyz"]
+            Metrics["/metrics (Prometheus)"]
+        end
+
+        Router["handleS3Request<br/>Query Param Dispatcher"]
+
+        subgraph ControlPlane["Control Plane — XML Translation"]
+            direction TB
+            LC["?lifecycle<br/>PUT / GET / DELETE"]
+            CORS["?cors<br/>PUT / GET / DELETE"]
+            LOG["?logging<br/>PUT / GET / DELETE"]
+            WEB["?website<br/>PUT / GET / DELETE"]
+            TAG["?tagging<br/>PUT / GET / DELETE"]
+
+            subgraph Translate["pkg/translate"]
+                S3XML["S3 XML Parse"]
+                GCSJSON["GCS SDK Struct"]
+                S3XML --> GCSJSON
+                GCSJSON --> S3XML
+            end
+        end
+
+        subgraph DataPlane["Data Plane — Reverse Proxy"]
+            direction TB
+            RP["httputil.ReverseProxy"]
+            Director["Director<br/>① Storage Class Mapping<br/>② x-id Stripping<br/>③ Accept-Encoding Fix<br/>④ Versioning Interop Header<br/>⑤ SigV4 Re-signing"]
+            ModResp["ModifyResponse<br/>x-goog-generation → x-amz-version-id"]
+            RP --> Director
+            RP --> ModResp
+        end
+    end
+
+    subgraph GCP["Google Cloud Platform"]
+        GCSSDK["GCS Go SDK<br/>bucket.Attrs / bucket.Update<br/>object.Attrs / object.Update"]
+        GCSS3["GCS S3-Compatible API<br/>storage.googleapis.com"]
+    end
+
+    Client -->|"All S3 Requests"| MW
+    MW --> Router
+    MW --> Ops
+
+    Router -->|"?lifecycle / ?cors / ?logging<br/>?website / ?tagging"| ControlPlane
+    Router -->|"All other requests<br/>(GET/PUT Object, etc.)"| DataPlane
+
+    LC --> Translate
+    CORS --> Translate
+    LOG --> Translate
+    WEB --> Translate
+    TAG --> Translate
+
+    Translate -->|"GCS SDK Calls<br/>+ timeGCSCall Metrics"| GCSSDK
+    DataPlane -->|"HTTP Streaming<br/>+ SigV4 Re-signing"| GCSS3
+
+    GCSSDK --> GCP
+    GCSS3 --> GCP
+```
+
+| Layer | Path | Handling |
+|---|---|---|
+| **Data Plane** | GET/PUT/DELETE Object, ListObjects, etc. | `ReverseProxy` streams to GCS S3-compatible API with header rewriting + SigV4 re-signing |
+| **Control Plane** | `?lifecycle` `?cors` `?logging` `?website` `?tagging` | Intercepts request, bi-directional S3 XML ↔ GCS SDK translation via GCS Go SDK |
+| **Operations** | `/health` `/readyz` `/metrics` | Health check, readiness probe (GCS connectivity), Prometheus metrics |
+
 ## Features
 
 - **Lifecycle Intercept**: Translates S3 XML Lifecycle Configuration to GCS JSON.
 - **Real GCS Forwarding**: Submits translated JSON to GCS via official GCS Go SDK.
 - **Structured JSON Logging**: Native `log/slog` for modern cloud observability (Parsable JSON lines). Toggle `DEBUG_LOGGING=true` for verbose output.
+- **Prometheus Metrics**: Request counts, latency histograms, GCS API call duration at `/metrics`.
 - **Reliable Timeouts**: Set timeouts on `http.Transport` to prevent hanging connections.
 - **Graceful Shutdown**: Listens for `SIGTERM`/`SIGINT` and waits up to 10s for draining requests.
 - **Prefix Isolation**: Use `GCS_PREFIX` for test isolation.
