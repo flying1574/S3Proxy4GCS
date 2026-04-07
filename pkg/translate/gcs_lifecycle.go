@@ -3,6 +3,8 @@ package translate
 import (
 	"encoding/json"
 	"fmt"
+
+	"cloud.google.com/go/storage"
 )
 
 // GCSLifecycle represents the top-level GCS Lifecycle JSON
@@ -50,7 +52,7 @@ func TranslateS3ToGCS(s3Cfg *LifecycleConfiguration) ([]byte, error) {
 			if err := applyRuleFilter(s3Rule.Filter, &rule.Condition); err != nil {
 				return nil, err
 			}
-			
+
 			if s3Rule.Expiration.Days != nil {
 				rule.Condition.Age = s3Rule.Expiration.Days
 			}
@@ -160,4 +162,87 @@ func formatDateS3toGCS(s3Date string) string {
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// TranslateGCSToS3Lifecycle converts GCS storage.Lifecycle to S3 LifecycleConfiguration XML struct.
+func TranslateGCSToS3Lifecycle(gcsLifecycle storage.Lifecycle) *LifecycleConfiguration {
+	s3Cfg := &LifecycleConfiguration{}
+
+	for i, gcsRule := range gcsLifecycle.Rules {
+		s3Rule := Rule{
+			ID:     fmt.Sprintf("rule-%d", i),
+			Status: "Enabled",
+		}
+
+		// Translate condition prefix to Filter
+		if len(gcsRule.Condition.MatchesPrefix) > 0 {
+			prefix := gcsRule.Condition.MatchesPrefix[0]
+			s3Rule.Filter = &Filter{Prefix: &prefix}
+		}
+
+		switch gcsRule.Action.Type {
+		case storage.DeleteAction:
+			if gcsRule.Condition.Liveness == storage.Archived {
+				// NoncurrentVersionExpiration
+				nve := &NoncurrentVersionExpiration{}
+				if gcsRule.Condition.NumNewerVersions > 0 {
+					days := int(gcsRule.Condition.NumNewerVersions)
+					nve.NoncurrentDays = &days
+				}
+				s3Rule.NoncurrentVersionExpirations = nve
+			} else {
+				// Standard Expiration
+				exp := &Expiration{}
+				if gcsRule.Condition.AgeInDays > 0 {
+					days := int(gcsRule.Condition.AgeInDays)
+					exp.Days = &days
+				}
+				if !gcsRule.Condition.CreatedBefore.IsZero() {
+					date := gcsRule.Condition.CreatedBefore.Format("2006-01-02T15:04:05.000Z")
+					exp.Date = &date
+				}
+				s3Rule.Expiration = exp
+			}
+		case storage.SetStorageClassAction:
+			trans := Transition{
+				StorageClass: reverseMapStorageClass(gcsRule.Action.StorageClass),
+			}
+			if gcsRule.Condition.AgeInDays > 0 {
+				days := int(gcsRule.Condition.AgeInDays)
+				trans.Days = &days
+			}
+			if !gcsRule.Condition.CreatedBefore.IsZero() {
+				date := gcsRule.Condition.CreatedBefore.Format("2006-01-02T15:04:05.000Z")
+				trans.Date = &date
+			}
+			s3Rule.Transitions = append(s3Rule.Transitions, trans)
+		case storage.AbortIncompleteMPUAction:
+			if gcsRule.Condition.AgeInDays > 0 {
+				days := int(gcsRule.Condition.AgeInDays)
+				s3Rule.AbortIncompleteMultipartUpload = &AbortIncompleteMultipartUpload{
+					DaysAfterInitiation: &days,
+				}
+			}
+		}
+
+		s3Cfg.Rules = append(s3Cfg.Rules, s3Rule)
+	}
+
+	return s3Cfg
+}
+
+// reverseMapStorageClass maps GCS storage class back to S3 equivalent.
+func reverseMapStorageClass(gcsClass string) string {
+	switch gcsClass {
+	case "NEARLINE":
+		return "STANDARD_IA"
+	case "COLDLINE":
+		return "GLACIER"
+	case "ARCHIVE":
+		return "DEEP_ARCHIVE"
+	case "STANDARD":
+		return "STANDARD"
+	default:
+		return gcsClass
+	}
 }

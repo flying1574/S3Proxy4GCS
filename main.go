@@ -18,14 +18,15 @@ import (
 	"syscall"
 	"time"
 
-	"cloud.google.com/go/storage"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"google.golang.org/api/option"
 	"s3proxy4gcs/config"
 	"s3proxy4gcs/pkg/translate"
+
+	"cloud.google.com/go/storage"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"google.golang.org/api/option"
 )
 
 var gcsClient *storage.Client
@@ -76,8 +77,8 @@ func main() {
 		slog.Info("Reverse Proxy using DryRun Transport (no real hits)")
 	} else {
 		reverseProxy.Transport = &http.Transport{
-			MaxIdleConns:        config.Config.MaxIdleConns,
-			MaxIdleConnsPerHost: config.Config.MaxIdleConnsPerHost,
+			MaxIdleConns:          config.Config.MaxIdleConns,
+			MaxIdleConnsPerHost:   config.Config.MaxIdleConnsPerHost,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
@@ -168,7 +169,7 @@ func main() {
 				}
 
 				signer := v4.NewSigner()
-				
+
 				// Strip User-Agent before re-signing to match aws4gcs known-good pattern
 				req.Header.Del("User-Agent")
 
@@ -263,9 +264,17 @@ func handleS3Request(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if this is a lifecycle request
-	if hasQueryParam("lifecycle") && r.Method == http.MethodPut {
-		handlePutLifecycle(w, r)
-		return
+	if hasQueryParam("lifecycle") {
+		if r.Method == http.MethodPut {
+			handlePutLifecycle(w, r)
+			return
+		} else if r.Method == http.MethodGet {
+			handleGetLifecycle(w, r)
+			return
+		} else if r.Method == http.MethodDelete {
+			handleDeleteLifecycle(w, r)
+			return
+		}
 	}
 
 	// Check if this is a CORS request
@@ -402,6 +411,43 @@ func handlePutLifecycle(w http.ResponseWriter, r *http.Request) {
 	slog.Info("Successfully updated GCS bucket lifecycle", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Successfully proxied and applied lifecycle to GCS."))
+}
+
+func handleGetLifecycle(w http.ResponseWriter, r *http.Request) {
+	bucket := gcsClient.Bucket(config.Config.TargetBucket)
+	attrs, err := bucket.Attrs(r.Context())
+	if err != nil {
+		slog.Error("Failed to fetch GCS bucket attributes for Lifecycle", "bucket", config.Config.TargetBucket, "error", err)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
+		return
+	}
+
+	s3Cfg := translate.TranslateGCSToS3Lifecycle(attrs.Lifecycle)
+	if s3Cfg == nil || len(s3Cfg.Rules) == 0 {
+		writeS3Error(w, http.StatusNotFound, "NoSuchLifecycleConfiguration", "The lifecycle configuration does not exist.")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	xml.NewEncoder(w).Encode(s3Cfg)
+}
+
+func handleDeleteLifecycle(w http.ResponseWriter, r *http.Request) {
+	bucket := gcsClient.Bucket(config.Config.TargetBucket)
+	uattrs := storage.BucketAttrsToUpdate{
+		Lifecycle: &storage.Lifecycle{Rules: nil},
+	}
+
+	_, err := bucket.Update(r.Context(), uattrs)
+	if err != nil {
+		slog.Error("Failed to reset GCS bucket lifecycle", "bucket", config.Config.TargetBucket, "error", err)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
+		return
+	}
+
+	slog.Info("Successfully deleted GCS bucket lifecycle", "bucket", config.Config.TargetBucket)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func handlePutCORS(w http.ResponseWriter, r *http.Request) {
