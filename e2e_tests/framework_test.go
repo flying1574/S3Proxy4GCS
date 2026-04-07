@@ -1,0 +1,52 @@
+package e2e
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"testing"
+	"time"
+)
+
+// testEnv is the shared environment configuration for all tests.
+var testEnv *Env
+
+func TestMain(m *testing.M) {
+	// 1. Load and validate environment
+	env, err := LoadEnv()
+	if err != nil {
+		log.Fatalf("E2E Environment setup failed: %v", err)
+	}
+	testEnv = env
+
+	fmt.Println("========================================")
+	fmt.Println("  S3Proxy4GCS E2E Acceptance Tests")
+	fmt.Println("========================================")
+	fmt.Printf("  Proxy Endpoint : %s\n", env.ProxyEndpoint)
+	fmt.Printf("  Test Bucket    : %s\n", env.TestBucket)
+	fmt.Printf("  Test Prefix    : %s\n", env.TestPrefix)
+	fmt.Println("========================================")
+
+	// 2. Wait for proxy to be healthy
+	fmt.Println("Waiting for proxy to become healthy...")
+	if err := WaitForProxy(env.ProxyEndpoint, 30*time.Second); err != nil {
+		log.Fatalf("Proxy health check failed: %v", err)
+	}
+	fmt.Println("Proxy is healthy. Starting tests...")
+	fmt.Println()
+
+	// 3. Run all tests
+	code := m.Run()
+
+	// 4. Summary
+	fmt.Println()
+	fmt.Println("========================================")
+	if code == 0 {
+		fmt.Println("  ALL E2E TESTS PASSED")
+	} else {
+		fmt.Println("  SOME E2E TESTS FAILED")
+	}
+	fmt.Println("========================================")
+
+	os.Exit(code)
+}
