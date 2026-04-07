@@ -306,9 +306,17 @@ func handleS3Request(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if this is a Website request
-	if hasQueryParam("website") && r.Method == http.MethodPut {
-		handlePutWebsite(w, r)
-		return
+	if hasQueryParam("website") {
+		if r.Method == http.MethodPut {
+			handlePutWebsite(w, r)
+			return
+		} else if r.Method == http.MethodGet {
+			handleGetWebsite(w, r)
+			return
+		} else if r.Method == http.MethodDelete {
+			handleDeleteWebsite(w, r)
+			return
+		}
 	}
 
 	// Check if this is a Tagging request
@@ -651,6 +659,43 @@ func handlePutWebsite(w http.ResponseWriter, r *http.Request) {
 	slog.Info("Successfully updated GCS bucket Website", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Successfully proxied and applied Website to GCS."))
+}
+
+func handleGetWebsite(w http.ResponseWriter, r *http.Request) {
+	bucket := gcsClient.Bucket(config.Config.TargetBucket)
+	attrs, err := bucket.Attrs(r.Context())
+	if err != nil {
+		slog.Error("Failed to fetch GCS bucket attributes for Website", "bucket", config.Config.TargetBucket, "error", err)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
+		return
+	}
+
+	s3Cfg := translate.TranslateGCSToS3Website(attrs.Website)
+	if s3Cfg == nil {
+		writeS3Error(w, http.StatusNotFound, "NoSuchWebsiteConfiguration", "The specified bucket does not have a website configuration.")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(http.StatusOK)
+	xml.NewEncoder(w).Encode(s3Cfg)
+}
+
+func handleDeleteWebsite(w http.ResponseWriter, r *http.Request) {
+	bucket := gcsClient.Bucket(config.Config.TargetBucket)
+	uattrs := storage.BucketAttrsToUpdate{
+		Website: &storage.BucketWebsite{},
+	}
+
+	_, err := bucket.Update(r.Context(), uattrs)
+	if err != nil {
+		slog.Error("Failed to reset GCS bucket Website", "bucket", config.Config.TargetBucket, "error", err)
+		writeS3Error(w, http.StatusBadGateway, "InternalError", fmt.Sprintf("GCS API error: %v", err))
+		return
+	}
+
+	slog.Info("Successfully deleted GCS bucket Website", "bucket", config.Config.TargetBucket)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func handlePutObjectTagging(w http.ResponseWriter, r *http.Request) {

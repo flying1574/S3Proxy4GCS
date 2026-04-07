@@ -24,3 +24,22 @@ func TranslateS3ToGCSWebsite(s3Cfg WebsiteConfiguration) *storage.BucketWebsite 
 
 	return gcsWebsite
 }
+
+// TranslateGCSToS3Website converts GCS BucketWebsite to S3 WebsiteConfiguration XML struct.
+func TranslateGCSToS3Website(gcsWebsite *storage.BucketWebsite) *WebsiteConfiguration {
+	if gcsWebsite == nil || (gcsWebsite.MainPageSuffix == "" && gcsWebsite.NotFoundPage == "") {
+		return nil
+	}
+
+	s3Cfg := &WebsiteConfiguration{}
+
+	if gcsWebsite.MainPageSuffix != "" {
+		s3Cfg.IndexDocument = &IndexDocument{Suffix: gcsWebsite.MainPageSuffix}
+	}
+
+	if gcsWebsite.NotFoundPage != "" {
+		s3Cfg.ErrorDocument = &ErrorDocument{Key: gcsWebsite.NotFoundPage}
+	}
+
+	return s3Cfg
+}
