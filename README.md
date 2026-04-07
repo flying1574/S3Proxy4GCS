@@ -186,17 +186,91 @@ The proxy intercepts `PUT /?lifecycle` and maps it directly to Google Cloud Stor
 
 ---
 
-## 🔬 Integration Tests (Isolated Module)
+## 🔬 Integration Tests (Local, Isolated Module)
 
 To run automated integration tests using the **AWS S3 Go SDK** without polluting the main project module, we use an isolated sub-module:
 
 ```bash
 cd integration_tests
-/usr/local/go/bin/go mod tidy
-/usr/local/go/bin/go test -v ./...
+go mod tidy
+go test -v ./...
 ```
 
-The test will automatically spawn the local proxy, run tests using the real AWS SDK client, and report results!
+The test will automatically spawn the local proxy in DryRun mode, run tests using the real AWS SDK client, and report results.
+
+---
+
+## 🧪 E2E Acceptance Tests (Live Environment)
+
+The `e2e_tests/` module provides a full acceptance test suite designed to run against a **live proxy deployment** (e.g. on GKE). It covers three dimensions: **functional correctness**, **stability**, and **performance benchmarks**.
+
+### Prerequisites
+
+- Go 1.24+
+- A running S3Proxy4GCS instance accessible via HTTP endpoint
+- GCS HMAC credentials (Access Key + Secret Key)
+- A GCS bucket for testing
+
+### Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `PROXY_ENDPOINT` | Yes | Proxy URL, e.g. `http://s3proxy.default.svc:8080` or `http://localhost:8080` |
+| `GCS_HMAC_ACCESS` | Yes | GCS HMAC Access Key ID |
+| `GCS_HMAC_SECRET` | Yes | GCS HMAC Secret Access Key |
+| `TEST_BUCKET` | Yes | Target GCS bucket name |
+| `TEST_PREFIX` | No | Object key prefix for test isolation (default: none) |
+| `STABILITY_ROUNDS` | No | Number of iterations for stability tests (default: `100`) |
+| `CONCURRENCY` | No | Number of parallel goroutines for concurrency tests (default: `10`) |
+
+### Run All Tests
+
+```bash
+cd e2e_tests
+go mod tidy
+
+export PROXY_ENDPOINT=http://<your-proxy-endpoint>:8080
+export GCS_HMAC_ACCESS=<your-access-key>
+export GCS_HMAC_SECRET=<your-secret-key>
+export TEST_BUCKET=<your-bucket>
+export TEST_PREFIX="e2e-$(date +%s)/"
+
+# Run all tests
+go test -v -count=1 -timeout 30m ./...
+```
+
+### Run Specific Test Suites
+
+```bash
+# Functional tests only (data plane + control plane + ops endpoints)
+go test -v -count=1 -run 'TestObjectCRUD|TestMultipartUpload|TestStorageClass|TestListObjects|TestVersioning|TestLifecycleCRUD|TestCORSCRUD|TestLoggingCRUD|TestWebsiteCRUD|TestTaggingCRUD|TestHealthEndpoint|TestReadyzEndpoint|TestMetricsEndpoint' ./...
+
+# Stability tests only
+STABILITY_ROUNDS=200 CONCURRENCY=20 go test -v -count=1 -timeout 30m -run 'TestLongRunningCRUD|TestConcurrentOperations|TestControlPlaneConcurrency' ./...
+
+# Performance benchmarks only (outputs benchmark_report.json)
+go test -v -count=1 -timeout 20m -run 'TestBenchmarkSuite' ./...
+```
+
+### Test Coverage
+
+| Suite | Tests | What It Validates |
+|---|---|---|
+| **Data Plane** | ObjectCRUD, MultipartUpload, StorageClass, ListObjectsV2, Versioning | Object lifecycle, body integrity, storage class translation, version ID mapping |
+| **Control Plane** | LifecycleCRUD, CORSCRUD, LoggingCRUD, WebsiteCRUD, TaggingCRUD | Full Put→Get→Delete→Get(empty) cycle for each bucket/object configuration |
+| **Operations** | HealthEndpoint, ReadyzEndpoint, MetricsEndpoint | Health check, GCS readiness probe, Prometheus metrics availability |
+| **Stability** | LongRunningCRUD, ConcurrentOperations, ControlPlaneConcurrency | Repeated CRUD loops, parallel goroutine safety, no data mixing |
+| **Benchmarks** | PutObject, GetObject, PutGetDelete, PutBucketLifecycle | Latency percentiles (p50/p95/p99), ops/sec, JSON report output |
+
+### CI/CD (GitHub Actions)
+
+The workflow at `.github/workflows/e2e-tests.yml` supports **manual trigger** (`workflow_dispatch`) with three parallel jobs:
+
+1. **Functional Tests** — runs all CRUD and ops endpoint tests
+2. **Stability Tests** — runs long-running and concurrency tests (depends on functional)
+3. **Performance Benchmarks** — runs latency benchmarks and uploads `benchmark_report.json` as artifact
+
+Required GitHub Secrets: `GCS_HMAC_ACCESS`, `GCS_HMAC_SECRET`, `TEST_BUCKET`.
 
 ---
 
