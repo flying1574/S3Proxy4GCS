@@ -395,10 +395,19 @@ func reqLogger(ctx context.Context) *slog.Logger {
 	return slog.Default().With("request_id", reqID)
 }
 
-// timeGCSCall executes a GCS SDK call, logs and records its duration.
-func timeGCSCall(ctx context.Context, operation string, fn func() error) error {
+// timeGCSCall executes a GCS SDK call with an optional per-call timeout,
+// logs and records its duration. The fn receives a context that may have
+// a deadline applied (controlled by GCS_CALL_TIMEOUT_SEC, default 30s).
+func timeGCSCall(ctx context.Context, operation string, fn func(ctx context.Context) error) error {
+	callCtx := ctx
+	if config.Config.GCSCallTimeout > 0 {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithTimeout(ctx, config.Config.GCSCallTimeout)
+		defer cancel()
+	}
+
 	start := time.Now()
-	err := fn()
+	err := fn(callCtx)
 	duration := time.Since(start)
 	gcsAPIDuration.WithLabelValues(operation).Observe(duration.Seconds())
 	log := reqLogger(ctx)
@@ -578,8 +587,8 @@ func handlePutLifecycle(w http.ResponseWriter, r *http.Request) {
 		Lifecycle: &storageLifecycle,
 	}
 
-	err = timeGCSCall(r.Context(), "PutBucketLifecycle", func() error {
-		_, e := bucket.Update(r.Context(), uattrs)
+	err = timeGCSCall(r.Context(), "PutBucketLifecycle", func(ctx context.Context) error {
+		_, e := bucket.Update(ctx, uattrs)
 		return e
 	})
 	if err != nil {
@@ -596,9 +605,9 @@ func handlePutLifecycle(w http.ResponseWriter, r *http.Request) {
 func handleGetLifecycle(w http.ResponseWriter, r *http.Request) {
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
 	var attrs *storage.BucketAttrs
-	err := timeGCSCall(r.Context(), "GetBucketLifecycle", func() error {
+	err := timeGCSCall(r.Context(), "GetBucketLifecycle", func(ctx context.Context) error {
 		var e error
-		attrs, e = bucket.Attrs(r.Context())
+		attrs, e = bucket.Attrs(ctx)
 		return e
 	})
 	if err != nil {
@@ -625,8 +634,8 @@ func handleDeleteLifecycle(w http.ResponseWriter, r *http.Request) {
 		Lifecycle: &storage.Lifecycle{Rules: nil},
 	}
 
-	err := timeGCSCall(r.Context(), "DeleteBucketLifecycle", func() error {
-		_, e := bucket.Update(r.Context(), uattrs)
+	err := timeGCSCall(r.Context(), "DeleteBucketLifecycle", func(ctx context.Context) error {
+		_, e := bucket.Update(ctx, uattrs)
 		return e
 	})
 	if err != nil {
@@ -687,8 +696,8 @@ func handlePutCORS(w http.ResponseWriter, r *http.Request) {
 		CORS: gcsCORS,
 	}
 
-	err = timeGCSCall(r.Context(), "PutBucketCors", func() error {
-		_, e := bucket.Update(r.Context(), uattrs)
+	err = timeGCSCall(r.Context(), "PutBucketCors", func(ctx context.Context) error {
+		_, e := bucket.Update(ctx, uattrs)
 		return e
 	})
 	if err != nil {
@@ -705,9 +714,9 @@ func handlePutCORS(w http.ResponseWriter, r *http.Request) {
 func handleGetCORS(w http.ResponseWriter, r *http.Request) {
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
 	var attrs *storage.BucketAttrs
-	err := timeGCSCall(r.Context(), "GetBucketCors", func() error {
+	err := timeGCSCall(r.Context(), "GetBucketCors", func(ctx context.Context) error {
 		var e error
-		attrs, e = bucket.Attrs(r.Context())
+		attrs, e = bucket.Attrs(ctx)
 		return e
 	})
 	if err != nil {
@@ -733,8 +742,8 @@ func handleDeleteCORS(w http.ResponseWriter, r *http.Request) {
 		CORS: []storage.CORS{},
 	}
 
-	err := timeGCSCall(r.Context(), "DeleteBucketCors", func() error {
-		_, e := bucket.Update(r.Context(), uattrs)
+	err := timeGCSCall(r.Context(), "DeleteBucketCors", func(ctx context.Context) error {
+		_, e := bucket.Update(ctx, uattrs)
 		return e
 	})
 	if err != nil {
@@ -785,8 +794,8 @@ func handlePutLogging(w http.ResponseWriter, r *http.Request) {
 		Logging: gcsLogging,
 	}
 
-	err = timeGCSCall(r.Context(), "PutBucketLogging", func() error {
-		_, e := bucket.Update(r.Context(), uattrs)
+	err = timeGCSCall(r.Context(), "PutBucketLogging", func(ctx context.Context) error {
+		_, e := bucket.Update(ctx, uattrs)
 		return e
 	})
 	if err != nil {
@@ -803,9 +812,9 @@ func handlePutLogging(w http.ResponseWriter, r *http.Request) {
 func handleGetLogging(w http.ResponseWriter, r *http.Request) {
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
 	var attrs *storage.BucketAttrs
-	err := timeGCSCall(r.Context(), "GetBucketLogging", func() error {
+	err := timeGCSCall(r.Context(), "GetBucketLogging", func(ctx context.Context) error {
 		var e error
-		attrs, e = bucket.Attrs(r.Context())
+		attrs, e = bucket.Attrs(ctx)
 		return e
 	})
 	if err != nil {
@@ -827,8 +836,8 @@ func handleDeleteLogging(w http.ResponseWriter, r *http.Request) {
 		Logging: &storage.BucketLogging{},
 	}
 
-	err := timeGCSCall(r.Context(), "DeleteBucketLogging", func() error {
-		_, e := bucket.Update(r.Context(), uattrs)
+	err := timeGCSCall(r.Context(), "DeleteBucketLogging", func(ctx context.Context) error {
+		_, e := bucket.Update(ctx, uattrs)
 		return e
 	})
 	if err != nil {
@@ -879,8 +888,8 @@ func handlePutWebsite(w http.ResponseWriter, r *http.Request) {
 		Website: gcsWebsite,
 	}
 
-	err = timeGCSCall(r.Context(), "PutBucketWebsite", func() error {
-		_, e := bucket.Update(r.Context(), uattrs)
+	err = timeGCSCall(r.Context(), "PutBucketWebsite", func(ctx context.Context) error {
+		_, e := bucket.Update(ctx, uattrs)
 		return e
 	})
 	if err != nil {
@@ -897,9 +906,9 @@ func handlePutWebsite(w http.ResponseWriter, r *http.Request) {
 func handleGetWebsite(w http.ResponseWriter, r *http.Request) {
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
 	var attrs *storage.BucketAttrs
-	err := timeGCSCall(r.Context(), "GetBucketWebsite", func() error {
+	err := timeGCSCall(r.Context(), "GetBucketWebsite", func(ctx context.Context) error {
 		var e error
-		attrs, e = bucket.Attrs(r.Context())
+		attrs, e = bucket.Attrs(ctx)
 		return e
 	})
 	if err != nil {
@@ -926,8 +935,8 @@ func handleDeleteWebsite(w http.ResponseWriter, r *http.Request) {
 		Website: &storage.BucketWebsite{},
 	}
 
-	err := timeGCSCall(r.Context(), "DeleteBucketWebsite", func() error {
-		_, e := bucket.Update(r.Context(), uattrs)
+	err := timeGCSCall(r.Context(), "DeleteBucketWebsite", func(ctx context.Context) error {
+		_, e := bucket.Update(ctx, uattrs)
 		return e
 	})
 	if err != nil {
@@ -984,9 +993,9 @@ func handlePutObjectTagging(w http.ResponseWriter, r *http.Request) {
 
 	obj := gcsClient.Bucket(targetBucket).Object(targetObject)
 	var attrs *storage.ObjectAttrs
-	err = timeGCSCall(r.Context(), "GetObjectAttrs_Tagging", func() error {
+	err = timeGCSCall(r.Context(), "GetObjectAttrs_Tagging", func(ctx context.Context) error {
 		var e error
-		attrs, e = obj.Attrs(r.Context())
+		attrs, e = obj.Attrs(ctx)
 		return e
 	})
 	if err != nil {
@@ -1000,10 +1009,10 @@ func handlePutObjectTagging(w http.ResponseWriter, r *http.Request) {
 		Metadata: updateMetadata,
 	}
 
-	err = timeGCSCall(r.Context(), "PutObjectTagging", func() error {
+	err = timeGCSCall(r.Context(), "PutObjectTagging", func(ctx context.Context) error {
 		_, e := obj.If(storage.Conditions{
 			MetagenerationMatch: attrs.Metageneration,
-		}).Update(r.Context(), uattrs)
+		}).Update(ctx, uattrs)
 		return e
 	})
 	if err != nil {
@@ -1035,9 +1044,9 @@ func handleGetObjectTagging(w http.ResponseWriter, r *http.Request) {
 
 	obj := gcsClient.Bucket(targetBucket).Object(targetObject)
 	var attrs *storage.ObjectAttrs
-	err := timeGCSCall(r.Context(), "GetObjectAttrs_GetTagging", func() error {
+	err := timeGCSCall(r.Context(), "GetObjectAttrs_GetTagging", func(ctx context.Context) error {
 		var e error
-		attrs, e = obj.Attrs(r.Context())
+		attrs, e = obj.Attrs(ctx)
 		return e
 	})
 	if err != nil {
@@ -1071,9 +1080,9 @@ func handleDeleteObjectTagging(w http.ResponseWriter, r *http.Request) {
 
 	obj := gcsClient.Bucket(targetBucket).Object(targetObject)
 	var attrs *storage.ObjectAttrs
-	err := timeGCSCall(r.Context(), "GetObjectAttrs_DeleteTagging", func() error {
+	err := timeGCSCall(r.Context(), "GetObjectAttrs_DeleteTagging", func(ctx context.Context) error {
 		var e error
-		attrs, e = obj.Attrs(r.Context())
+		attrs, e = obj.Attrs(ctx)
 		return e
 	})
 	if err != nil {
@@ -1093,10 +1102,10 @@ func handleDeleteObjectTagging(w http.ResponseWriter, r *http.Request) {
 		Metadata: updateMetadata,
 	}
 
-	err = timeGCSCall(r.Context(), "DeleteObjectTagging", func() error {
+	err = timeGCSCall(r.Context(), "DeleteObjectTagging", func(ctx context.Context) error {
 		_, e := obj.If(storage.Conditions{
 			MetagenerationMatch: attrs.Metageneration,
-		}).Update(r.Context(), uattrs)
+		}).Update(ctx, uattrs)
 		return e
 	})
 	if err != nil {

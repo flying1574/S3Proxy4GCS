@@ -4,25 +4,27 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/joho/godotenv"
 )
 
 // Settings contains all the configuration for the proxy
 type Settings struct {
-	Port                string
-	GCPProjectID        string
-	TargetBucket        string
-	StorageBaseURL      string // For testing or custom setups
-	GCSPrefix           string // Subfolder prefix for testing or namespacing
-	DryRun              bool   // DryRun mode disables real GCS API hits
-	DebugLogging        bool   // DebugLogging enables verbose output
+	Port                  string
+	GCPProjectID          string
+	TargetBucket          string
+	StorageBaseURL        string // For testing or custom setups
+	GCSPrefix             string // Subfolder prefix for testing or namespacing
+	DryRun                bool   // DryRun mode disables real GCS API hits
+	DebugLogging          bool   // DebugLogging enables verbose output
 	MaxIdleConns          int
 	MaxIdleConnsPerHost   int
-	MaxConcurrentRequests int    // Throttle middleware limit; 0 = no limit
-	ProxyAccessKey        string // For re-signing
-	ProxySecretKey      string // For re-signing
-	JSONKey             string // Path to GCS Service Account JSON key
+	MaxConcurrentRequests int            // Throttle middleware limit; 0 = no limit
+	GCSCallTimeout        time.Duration   // Timeout for individual GCS SDK calls; 0 = no limit
+	ProxyAccessKey        string          // For re-signing
+	ProxySecretKey        string // For re-signing
+	JSONKey               string // Path to GCS Service Account JSON key
 }
 
 var Config *Settings
@@ -67,6 +69,17 @@ func LoadConfig() {
 		}
 	}
 
+	gcsCallTimeoutSec := 30
+	if v := getEnv("GCS_CALL_TIMEOUT_SEC", "30"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil {
+			log.Printf("WARNING: invalid GCS_CALL_TIMEOUT_SEC value %q, using default 30", v)
+		} else if n > 0 {
+			gcsCallTimeoutSec = n
+		} else {
+			gcsCallTimeoutSec = 0 // 0 means disabled
+		}
+	}
+
 	Config = &Settings{
 		Port:                  getEnv("PORT", "8080"),
 		GCPProjectID:          getEnv("GCP_PROJECT_ID", ""),
@@ -78,9 +91,10 @@ func LoadConfig() {
 		MaxIdleConns:          maxIdleConns,
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		MaxConcurrentRequests: maxConcurrentRequests,
-		ProxyAccessKey:      getEnv("PROXY_AWS_ACCESS_KEY_ID", getEnv("AWS_ACCESS_KEY_ID", "")),
-		ProxySecretKey:      getEnv("PROXY_AWS_SECRET_ACCESS_KEY", getEnv("AWS_SECRET_ACCESS_KEY", "")),
-		JSONKey:             getEnv("JSON_KEY", ""),
+		GCSCallTimeout:        time.Duration(gcsCallTimeoutSec) * time.Second,
+		ProxyAccessKey:        getEnv("PROXY_AWS_ACCESS_KEY_ID", getEnv("AWS_ACCESS_KEY_ID", "")),
+		ProxySecretKey:        getEnv("PROXY_AWS_SECRET_ACCESS_KEY", getEnv("AWS_SECRET_ACCESS_KEY", "")),
+		JSONKey:               getEnv("JSON_KEY", ""),
 	}
 
 	// Validate required fields for non-DryRun mode
