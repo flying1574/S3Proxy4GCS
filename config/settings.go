@@ -37,8 +37,23 @@ func LoadConfig() {
 	dryRun := dryRunStr == "true"
 	debugLogging := getEnv("DEBUG_LOGGING", "false") == "true"
 
-	maxIdleConns, _ := strconv.Atoi(getEnv("MAX_IDLE_CONNS", "1000"))
-	maxIdleConnsPerHost, _ := strconv.Atoi(getEnv("MAX_IDLE_CONNS_PER_HOST", "1000"))
+	maxIdleConns := 1000
+	if v := getEnv("MAX_IDLE_CONNS", "1000"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil {
+			log.Printf("WARNING: invalid MAX_IDLE_CONNS value %q, using default 1000", v)
+		} else {
+			maxIdleConns = n
+		}
+	}
+
+	maxIdleConnsPerHost := 1000
+	if v := getEnv("MAX_IDLE_CONNS_PER_HOST", "1000"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil {
+			log.Printf("WARNING: invalid MAX_IDLE_CONNS_PER_HOST value %q, using default 1000", v)
+		} else {
+			maxIdleConnsPerHost = n
+		}
+	}
 
 	Config = &Settings{
 		Port:                getEnv("PORT", "8080"),
@@ -53,6 +68,16 @@ func LoadConfig() {
 		ProxyAccessKey:      getEnv("PROXY_AWS_ACCESS_KEY_ID", getEnv("AWS_ACCESS_KEY_ID", "")),
 		ProxySecretKey:      getEnv("PROXY_AWS_SECRET_ACCESS_KEY", getEnv("AWS_SECRET_ACCESS_KEY", "")),
 		JSONKey:             getEnv("JSON_KEY", ""),
+	}
+
+	// Validate required fields for non-DryRun mode
+	if !dryRun {
+		if Config.TargetBucket == "" {
+			log.Fatal("FATAL: TARGET_BUCKET is required when DRY_RUN=false")
+		}
+		if Config.GCPProjectID == "" {
+			log.Println("WARNING: GCP_PROJECT_ID is empty, some GCS operations may fail")
+		}
 	}
 }
 

@@ -40,6 +40,10 @@ func TranslateGCSToS3Tagging(metadata map[string]string) *Tagging {
 	for k, v := range metadata {
 		if strings.HasPrefix(strings.ToLower(k), strings.ToLower(S3TagPrefix)) {
 			key := k[len(S3TagPrefix):]
+			if key == "" {
+				slog.Warn("Skipping GCS metadata entry with empty tag key after prefix", "raw_key", k)
+				continue
+			}
 			t.TagSet = append(t.TagSet, Tag{Key: key, Value: v})
 		}
 	}
