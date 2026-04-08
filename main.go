@@ -287,6 +287,14 @@ func main() {
 	srv := &http.Server{
 		Addr:    ":" + config.Config.Port,
 		Handler: r,
+
+		// Timeout settings aligned with AWS SDK for Go v2 defaults:
+		// - ReadHeaderTimeout: matches SDK's TLSHandshakeTimeout (10s), prevents Slowloris attacks
+		// - IdleTimeout: matches SDK's IdleConnTimeout (90s), releases idle keep-alive connections
+		// - ReadTimeout/WriteTimeout: intentionally unset (0) to support data-plane streaming
+		//   of large objects (S3 max 50TB), consistent with SDK not setting Client.Timeout
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       90 * time.Second,
 	}
 
 	serverErrors := make(chan error, 1)
