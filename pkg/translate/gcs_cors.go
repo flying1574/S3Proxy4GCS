@@ -2,14 +2,18 @@ package translate
 
 import (
 	"log/slog"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
 )
 
-// TranslateS3ToGCSCors converts S3 CORS Configuration XML to GCS storage.CORS slice
-func TranslateS3ToGCSCors(s3Cfg *CORSConfiguration) []storage.CORS {
+// TranslateS3ToGCSCors converts S3 CORS Configuration XML to GCS storage.CORS slice.
+// It returns the translated GCS CORS rules and a list of AllowedHeaders that were
+// dropped because GCS CORS does not support request header filtering.
+func TranslateS3ToGCSCors(s3Cfg *CORSConfiguration) ([]storage.CORS, []string) {
 	var gcsCors []storage.CORS
+	var droppedHeaders []string
 
 	for _, rule := range s3Cfg.CORSRules {
 		var maxAge time.Duration
@@ -18,7 +22,9 @@ func TranslateS3ToGCSCors(s3Cfg *CORSConfiguration) []storage.CORS {
 		}
 
 		if len(rule.AllowedHeaders) > 0 {
-			slog.Warn("S3 AllowedHeaders (Request Headers) are not natively supported by GCS CORS translation and will be ignored.")
+			slog.Warn("S3 AllowedHeaders (Request Headers) are not natively supported by GCS CORS translation and will be ignored.",
+				"dropped_headers", rule.AllowedHeaders)
+			droppedHeaders = append(droppedHeaders, rule.AllowedHeaders...)
 		}
 
 		gcsRule := storage.CORS{
@@ -31,7 +37,21 @@ func TranslateS3ToGCSCors(s3Cfg *CORSConfiguration) []storage.CORS {
 		gcsCors = append(gcsCors, gcsRule)
 	}
 
-	return gcsCors
+	// Deduplicate dropped headers
+	if len(droppedHeaders) > 0 {
+		seen := make(map[string]bool, len(droppedHeaders))
+		unique := droppedHeaders[:0]
+		for _, h := range droppedHeaders {
+			lower := strings.ToLower(h)
+			if !seen[lower] {
+				seen[lower] = true
+				unique = append(unique, h)
+			}
+		}
+		droppedHeaders = unique
+	}
+
+	return gcsCors, droppedHeaders
 }
 
 // TranslateGCSToS3Cors converts GCS CORS configuration to S3 CORSConfiguration XML

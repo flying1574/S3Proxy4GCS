@@ -666,7 +666,13 @@ func handlePutCORS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Translate to GCS CORS
-	gcsCORS := translate.TranslateS3ToGCSCors(&s3Cfg)
+	gcsCORS, droppedHeaders := translate.TranslateS3ToGCSCors(&s3Cfg)
+
+	// Warn client about unsupported AllowedHeaders via response header
+	if len(droppedHeaders) > 0 {
+		w.Header().Set("X-S3Proxy-Warning",
+			fmt.Sprintf("AllowedHeaders not supported by GCS and were ignored: %s", strings.Join(droppedHeaders, ", ")))
+	}
 
 	// 4. In DryRun mode, just print/return success
 	if config.Config.DryRun {

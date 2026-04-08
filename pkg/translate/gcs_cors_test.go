@@ -27,7 +27,12 @@ func TestTranslateS3ToGCSCors(t *testing.T) {
 		t.Fatalf("Failed to unmarshal XML input: %v", err)
 	}
 
-	gcsCors := TranslateS3ToGCSCors(&s3Cfg)
+	gcsCors, droppedHeaders := TranslateS3ToGCSCors(&s3Cfg)
+
+	// Verify dropped AllowedHeaders are reported
+	if len(droppedHeaders) != 1 || droppedHeaders[0] != "Authorization" {
+		t.Errorf("Expected droppedHeaders ['Authorization'], got %v", droppedHeaders)
+	}
 
 	if len(gcsCors) == 0 {
 		t.Fatalf("Expected at least one CORS rule, got none")
