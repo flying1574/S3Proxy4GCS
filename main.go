@@ -241,6 +241,16 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(observabilityMiddleware)
 
+	// Concurrency limiter — prevents goroutine/connection exhaustion under burst load.
+	// Requests exceeding the limit receive 503 Service Unavailable.
+	// Configurable via MAX_CONCURRENT_REQUESTS (default 1000, 0 = disabled).
+	if config.Config.MaxConcurrentRequests > 0 {
+		r.Use(middleware.Throttle(config.Config.MaxConcurrentRequests))
+		slog.Info("Concurrency throttle enabled", "max_concurrent_requests", config.Config.MaxConcurrentRequests)
+	} else {
+		slog.Warn("Concurrency throttle DISABLED (MAX_CONCURRENT_REQUESTS=0)")
+	}
+
 	// Operational endpoints (excluded from S3 routing)
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

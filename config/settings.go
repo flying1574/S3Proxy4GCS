@@ -17,9 +17,10 @@ type Settings struct {
 	GCSPrefix           string // Subfolder prefix for testing or namespacing
 	DryRun              bool   // DryRun mode disables real GCS API hits
 	DebugLogging        bool   // DebugLogging enables verbose output
-	MaxIdleConns        int
-	MaxIdleConnsPerHost int
-	ProxyAccessKey      string // For re-signing
+	MaxIdleConns          int
+	MaxIdleConnsPerHost   int
+	MaxConcurrentRequests int    // Throttle middleware limit; 0 = no limit
+	ProxyAccessKey        string // For re-signing
 	ProxySecretKey      string // For re-signing
 	JSONKey             string // Path to GCS Service Account JSON key
 }
@@ -55,16 +56,28 @@ func LoadConfig() {
 		}
 	}
 
+	maxConcurrentRequests := 1000
+	if v := getEnv("MAX_CONCURRENT_REQUESTS", "1000"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil {
+			log.Printf("WARNING: invalid MAX_CONCURRENT_REQUESTS value %q, using default 1000", v)
+		} else if n > 0 {
+			maxConcurrentRequests = n
+		} else {
+			maxConcurrentRequests = 0 // 0 means disabled
+		}
+	}
+
 	Config = &Settings{
-		Port:                getEnv("PORT", "8080"),
-		GCPProjectID:        getEnv("GCP_PROJECT_ID", ""),
-		TargetBucket:        getEnv("TARGET_BUCKET", ""),
-		StorageBaseURL:      getEnv("STORAGE_BASE_URL", "https://storage.googleapis.com"),
-		GCSPrefix:           getEnv("GCS_PREFIX", ""),
-		DryRun:              dryRun,
-		DebugLogging:        debugLogging,
-		MaxIdleConns:        maxIdleConns,
-		MaxIdleConnsPerHost: maxIdleConnsPerHost,
+		Port:                  getEnv("PORT", "8080"),
+		GCPProjectID:          getEnv("GCP_PROJECT_ID", ""),
+		TargetBucket:          getEnv("TARGET_BUCKET", ""),
+		StorageBaseURL:        getEnv("STORAGE_BASE_URL", "https://storage.googleapis.com"),
+		GCSPrefix:             getEnv("GCS_PREFIX", ""),
+		DryRun:                dryRun,
+		DebugLogging:          debugLogging,
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		MaxConcurrentRequests: maxConcurrentRequests,
 		ProxyAccessKey:      getEnv("PROXY_AWS_ACCESS_KEY_ID", getEnv("AWS_ACCESS_KEY_ID", "")),
 		ProxySecretKey:      getEnv("PROXY_AWS_SECRET_ACCESS_KEY", getEnv("AWS_SECRET_ACCESS_KEY", "")),
 		JSONKey:             getEnv("JSON_KEY", ""),

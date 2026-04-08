@@ -26,6 +26,7 @@ Available Configuration Options:
 -   `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`: Proxy's HMAC credentials for re-signing requests to GCS.
 -   `MAX_IDLE_CONNS` (Default: `1000`): Maximum idle connections for the reverse proxy.
 -   `MAX_IDLE_CONNS_PER_HOST` (Default: `1000`): Maximum idle connections per host for the reverse pool.
+-   `MAX_CONCURRENT_REQUESTS` (Default: `1000`): Maximum number of requests processed concurrently. Excess requests receive `503 Service Unavailable`. Set to `0` to disable throttling. **This value should be tuned based on machine resources (CPU cores, memory) and GCS API rate limits through performance benchmarking.**
 
 ## Using with standard AWS S3 SDK (Zero Code Change via HTTP_PROXY)
 
