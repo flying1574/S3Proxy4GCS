@@ -31,6 +31,12 @@ import (
 	"google.golang.org/api/option"
 )
 
+// maxControlPlaneBodySize is the maximum allowed request body size for
+// control-plane PUT operations (Lifecycle, CORS, Logging, Website, Tagging).
+// This matches the AWS S3 documented limit of 64 KB for bucket configuration
+// XML payloads, preventing memory-exhaustion attacks via oversized bodies.
+const maxControlPlaneBodySize = 64 * 1024 // 64 KB
+
 var gcsClient *storage.Client
 var gcsCtx context.Context
 var reverseProxy *httputil.ReverseProxy
@@ -501,10 +507,16 @@ func (t *dryRunTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 func handlePutLifecycle(w http.ResponseWriter, r *http.Request) {
 	log := reqLogger(r.Context())
 
-	// 1. Read body
+	// 1. Read body (capped at 64 KB to match S3 control-plane limit)
+	r.Body = http.MaxBytesReader(w, r.Body, maxControlPlaneBodySize)
 	defer r.Body.Close()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if err.Error() == "http: request body too large" {
+			writeS3Error(w, http.StatusBadRequest, "MaxMessageLengthExceeded",
+				fmt.Sprintf("Your request was too big. Max configuration size is %d bytes.", maxControlPlaneBodySize))
+			return
+		}
 		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to read request body.")
 		return
 	}
@@ -612,10 +624,16 @@ func handleDeleteLifecycle(w http.ResponseWriter, r *http.Request) {
 func handlePutCORS(w http.ResponseWriter, r *http.Request) {
 	log := reqLogger(r.Context())
 
-	// 1. Read body
+	// 1. Read body (capped at 64 KB to match S3 control-plane limit)
+	r.Body = http.MaxBytesReader(w, r.Body, maxControlPlaneBodySize)
 	defer r.Body.Close()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if err.Error() == "http: request body too large" {
+			writeS3Error(w, http.StatusBadRequest, "MaxMessageLengthExceeded",
+				fmt.Sprintf("Your request was too big. Max configuration size is %d bytes.", maxControlPlaneBodySize))
+			return
+		}
 		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to read request body.")
 		return
 	}
@@ -708,9 +726,16 @@ func handleDeleteCORS(w http.ResponseWriter, r *http.Request) {
 func handlePutLogging(w http.ResponseWriter, r *http.Request) {
 	log := reqLogger(r.Context())
 
+	// Read body (capped at 64 KB to match S3 control-plane limit)
+	r.Body = http.MaxBytesReader(w, r.Body, maxControlPlaneBodySize)
 	defer r.Body.Close()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if err.Error() == "http: request body too large" {
+			writeS3Error(w, http.StatusBadRequest, "MaxMessageLengthExceeded",
+				fmt.Sprintf("Your request was too big. Max configuration size is %d bytes.", maxControlPlaneBodySize))
+			return
+		}
 		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to read request body.")
 		return
 	}
@@ -795,9 +820,16 @@ func handleDeleteLogging(w http.ResponseWriter, r *http.Request) {
 func handlePutWebsite(w http.ResponseWriter, r *http.Request) {
 	log := reqLogger(r.Context())
 
+	// Read body (capped at 64 KB to match S3 control-plane limit)
+	r.Body = http.MaxBytesReader(w, r.Body, maxControlPlaneBodySize)
 	defer r.Body.Close()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if err.Error() == "http: request body too large" {
+			writeS3Error(w, http.StatusBadRequest, "MaxMessageLengthExceeded",
+				fmt.Sprintf("Your request was too big. Max configuration size is %d bytes.", maxControlPlaneBodySize))
+			return
+		}
 		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to read request body.")
 		return
 	}
@@ -887,9 +919,16 @@ func handleDeleteWebsite(w http.ResponseWriter, r *http.Request) {
 func handlePutObjectTagging(w http.ResponseWriter, r *http.Request) {
 	log := reqLogger(r.Context())
 
+	// Read body (capped at 64 KB to match S3 control-plane limit)
+	r.Body = http.MaxBytesReader(w, r.Body, maxControlPlaneBodySize)
 	defer r.Body.Close()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		if err.Error() == "http: request body too large" {
+			writeS3Error(w, http.StatusBadRequest, "MaxMessageLengthExceeded",
+				fmt.Sprintf("Your request was too big. Max configuration size is %d bytes.", maxControlPlaneBodySize))
+			return
+		}
 		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Failed to read request body.")
 		return
 	}
