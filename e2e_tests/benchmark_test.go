@@ -7,7 +7,10 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,37 +19,65 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
-// BenchmarkReport holds the aggregate benchmark results for JSON export.
+// ---------------------------------------------------------------------------
+// Configuration (overridable via environment variables)
+// ---------------------------------------------------------------------------
+
+func getBenchConcurrency() int {
+	if v := os.Getenv("BENCH_CONCURRENCY"); v != "" {
+		if n, _ := strconv.Atoi(v); n > 0 {
+			return n
+		}
+	}
+	return 20
+}
+
+func getBenchDurationSec() int {
+	if v := os.Getenv("BENCH_DURATION_SEC"); v != "" {
+		if n, _ := strconv.Atoi(v); n > 0 {
+			return n
+		}
+	}
+	return 30
+}
+
+// ---------------------------------------------------------------------------
+// Report types
+// ---------------------------------------------------------------------------
+
+// BenchmarkReport holds the aggregate benchmark results with system metrics.
 type BenchmarkReport struct {
 	Timestamp     string            `json:"timestamp"`
 	ProxyEndpoint string            `json:"proxy_endpoint"`
+	Config        BenchmarkConfig   `json:"config"`
 	Results       []BenchmarkResult `json:"results"`
+}
+
+type BenchmarkConfig struct {
+	Concurrency int `json:"concurrency"`
+	DurationSec int `json:"duration_sec"`
 }
 
 // BenchmarkResult holds a single benchmark's statistics.
 type BenchmarkResult struct {
-	Name      string  `json:"name"`
-	Ops       int     `json:"total_ops"`
-	OpsPerSec float64 `json:"ops_per_sec"`
-	P50Ms     float64 `json:"p50_ms"`
-	P95Ms     float64 `json:"p95_ms"`
-	P99Ms     float64 `json:"p99_ms"`
-	AvgMs     float64 `json:"avg_ms"`
+	Name        string      `json:"name"`
+	PayloadSize string      `json:"payload_size"`
+	Concurrency int         `json:"concurrency"`
+	DurationSec float64     `json:"duration_sec"`
+	TotalOps    int64       `json:"total_ops"`
+	Errors      int64       `json:"errors"`
+	OpsPerSec   float64     `json:"ops_per_sec"`
+	P50Ms       float64     `json:"p50_ms"`
+	P95Ms       float64     `json:"p95_ms"`
+	P99Ms       float64     `json:"p99_ms"`
+	AvgMs       float64     `json:"avg_ms"`
+	MaxMs       float64     `json:"max_ms"`
+	System      SystemDelta `json:"system_metrics"`
 }
 
-// collectLatencies runs fn n times, collecting latencies, and returns sorted durations.
-func collectLatencies(n int, fn func() error) ([]time.Duration, error) {
-	latencies := make([]time.Duration, 0, n)
-	for i := 0; i < n; i++ {
-		start := time.Now()
-		if err := fn(); err != nil {
-			return latencies, fmt.Errorf("iteration %d: %w", i, err)
-		}
-		latencies = append(latencies, time.Since(start))
-	}
-	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-	return latencies, nil
-}
+// ---------------------------------------------------------------------------
+// Latency helpers
+// ---------------------------------------------------------------------------
 
 func percentile(sorted []time.Duration, p float64) time.Duration {
 	if len(sorted) == 0 {
@@ -70,126 +101,287 @@ func avgDuration(sorted []time.Duration) time.Duration {
 	return total / time.Duration(len(sorted))
 }
 
-func toBenchmarkResult(name string, latencies []time.Duration, totalDur time.Duration) BenchmarkResult {
-	ops := len(latencies)
-	opsPerSec := float64(ops) / totalDur.Seconds()
-	return BenchmarkResult{
-		Name:      name,
-		Ops:       ops,
-		OpsPerSec: opsPerSec,
-		P50Ms:     float64(percentile(latencies, 0.50).Microseconds()) / 1000.0,
-		P95Ms:     float64(percentile(latencies, 0.95).Microseconds()) / 1000.0,
-		P99Ms:     float64(percentile(latencies, 0.99).Microseconds()) / 1000.0,
-		AvgMs:     float64(avgDuration(latencies).Microseconds()) / 1000.0,
+func durationMs(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000.0
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent load runner
+// ---------------------------------------------------------------------------
+
+// loadResult holds raw results from a concurrent load test.
+type loadResult struct {
+	latencies []time.Duration
+	totalOps  int64
+	errors    int64
+}
+
+// runConcurrentLoad runs fn across N goroutines for the specified duration,
+// collecting per-operation latencies from all goroutines.
+func runConcurrentLoad(concurrency int, duration time.Duration, fn func() error) loadResult {
+	var (
+		mu        sync.Mutex
+		allLats   []time.Duration
+		totalOps  atomic.Int64
+		totalErrs atomic.Int64
+	)
+
+	deadline := time.Now().Add(duration)
+	var wg sync.WaitGroup
+
+	for g := 0; g < concurrency; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var localLats []time.Duration
+
+			for time.Now().Before(deadline) {
+				start := time.Now()
+				if err := fn(); err != nil {
+					totalErrs.Add(1)
+				} else {
+					localLats = append(localLats, time.Since(start))
+				}
+				totalOps.Add(1)
+			}
+
+			mu.Lock()
+			allLats = append(allLats, localLats...)
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+
+	sort.Slice(allLats, func(i, j int) bool { return allLats[i] < allLats[j] })
+
+	return loadResult{
+		latencies: allLats,
+		totalOps:  totalOps.Load(),
+		errors:    totalErrs.Load(),
 	}
 }
 
-const benchmarkIterations = 50
+// toBenchmarkResult constructs a BenchmarkResult from load results + system delta.
+func toBenchmarkResult(name, payloadSize string, concurrency int, lr loadResult, wallClock time.Duration, delta SystemDelta) BenchmarkResult {
+	opsPerSec := 0.0
+	if wallClock.Seconds() > 0 {
+		opsPerSec = float64(len(lr.latencies)) / wallClock.Seconds()
+	}
 
-// TestBenchmarkSuite runs all benchmarks and outputs a JSON report.
-// Using Test prefix (not Benchmark) so it runs with `go test -run` and can output custom JSON.
+	maxMs := 0.0
+	if len(lr.latencies) > 0 {
+		maxMs = durationMs(lr.latencies[len(lr.latencies)-1])
+	}
+
+	return BenchmarkResult{
+		Name:        name,
+		PayloadSize: payloadSize,
+		Concurrency: concurrency,
+		DurationSec: wallClock.Seconds(),
+		TotalOps:    lr.totalOps,
+		Errors:      lr.errors,
+		OpsPerSec:   opsPerSec,
+		P50Ms:       durationMs(percentile(lr.latencies, 0.50)),
+		P95Ms:       durationMs(percentile(lr.latencies, 0.95)),
+		P99Ms:       durationMs(percentile(lr.latencies, 0.99)),
+		AvgMs:       durationMs(avgDuration(lr.latencies)),
+		MaxMs:       maxMs,
+		System:      delta,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Payload helpers
+// ---------------------------------------------------------------------------
+
+type payloadTier struct {
+	Name string
+	Size int
+}
+
+var payloadTiers = []payloadTier{
+	{"1KB", 1024},
+	{"100KB", 100 * 1024},
+	{"1MB", 1024 * 1024},
+	{"10MB", 10 * 1024 * 1024},
+}
+
+func makePayload(size int) string {
+	return strings.Repeat("X", size)
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark suite
+// ---------------------------------------------------------------------------
+
+// TestBenchmarkSuite runs all benchmarks with concurrent load and system metrics.
 func TestBenchmarkSuite(t *testing.T) {
 	client := NewS3Client(t, testEnv)
 	bucket := testEnv.TestBucket
+	concurrency := getBenchConcurrency()
+	durationSec := getBenchDurationSec()
+	duration := time.Duration(durationSec) * time.Second
+
+	mc := NewMetricsCollector(testEnv.ProxyEndpoint)
 
 	report := BenchmarkReport{
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
 		ProxyEndpoint: testEnv.ProxyEndpoint,
+		Config: BenchmarkConfig{
+			Concurrency: concurrency,
+			DurationSec: durationSec,
+		},
 	}
 
-	// --- Benchmark: PutObject 1KB ---
-	t.Log("Benchmark: PutObject_1KB...")
-	putKey := GenerateTestKey(testEnv, "bench-put")
-	t.Cleanup(func() { Cleanup(t, client, bucket, putKey) })
+	t.Logf("Benchmark config: concurrency=%d, duration=%ds", concurrency, durationSec)
+	t.Log("")
 
-	start := time.Now()
-	putLatencies, err := collectLatencies(benchmarkIterations, func() error {
-		_, e := client.PutObject(context.TODO(), &s3.PutObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String(putKey),
-			Body:   strings.NewReader(strings.Repeat("X", 1024)),
+	// =======================================================================
+	// 1. Multi-tier PutObject load test
+	// =======================================================================
+	for _, tier := range payloadTiers {
+		t.Logf("=== PutObject %s (%d concurrent, %ds) ===", tier.Name, concurrency, durationSec)
+		payload := makePayload(tier.Size)
+
+		before, _ := mc.Snapshot()
+		start := time.Now()
+
+		lr := runConcurrentLoad(concurrency, duration, func() error {
+			key := fmt.Sprintf("%sbench-put-%s-%d", testEnv.TestPrefix, tier.Name, time.Now().UnixNano())
+			_, err := client.PutObject(context.TODO(), &s3.PutObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+				Body:   strings.NewReader(payload),
+			})
+			// Best-effort cleanup (fire and forget)
+			if err == nil {
+				go func() {
+					client.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
+						Bucket: aws.String(bucket),
+						Key:    aws.String(key),
+					})
+				}()
+			}
+			return err
 		})
-		return e
-	})
-	if err != nil {
-		t.Fatalf("PutObject benchmark failed: %v", err)
+
+		wallClock := time.Since(start)
+		after, _ := mc.Snapshot()
+		delta := ComputeDelta(before, after, wallClock)
+
+		result := toBenchmarkResult("PutObject_"+tier.Name, tier.Name, concurrency, lr, wallClock, delta)
+		report.Results = append(report.Results, result)
+
+		printBenchResult(t, result)
 	}
-	putResult := toBenchmarkResult("PutObject_1KB", putLatencies, time.Since(start))
-	report.Results = append(report.Results, putResult)
-	t.Logf("  PutObject_1KB: ops/s=%.1f p50=%.1fms p95=%.1fms p99=%.1fms", putResult.OpsPerSec, putResult.P50Ms, putResult.P95Ms, putResult.P99Ms)
 
-	// --- Benchmark: GetObject 1KB ---
-	t.Log("Benchmark: GetObject_1KB...")
-	// Object already exists from PutObject benchmark
-	start = time.Now()
-	getLatencies, err := collectLatencies(benchmarkIterations, func() error {
-		out, e := client.GetObject(context.TODO(), &s3.GetObjectInput{
+	// =======================================================================
+	// 2. Multi-tier GetObject load test
+	// =======================================================================
+	for _, tier := range payloadTiers {
+		t.Logf("=== GetObject %s (%d concurrent, %ds) ===", tier.Name, concurrency, durationSec)
+
+		// Seed one object for reads
+		seedKey := fmt.Sprintf("%sbench-get-seed-%s", testEnv.TestPrefix, tier.Name)
+		payload := makePayload(tier.Size)
+		_, err := client.PutObject(context.TODO(), &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
-			Key:    aws.String(putKey),
+			Key:    aws.String(seedKey),
+			Body:   strings.NewReader(payload),
 		})
-		if e != nil {
-			return e
+		if err != nil {
+			t.Logf("  [skip] Failed to seed object for GetObject %s: %v", tier.Name, err)
+			continue
 		}
-		io.Copy(io.Discard, out.Body)
-		out.Body.Close()
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("GetObject benchmark failed: %v", err)
-	}
-	getResult := toBenchmarkResult("GetObject_1KB", getLatencies, time.Since(start))
-	report.Results = append(report.Results, getResult)
-	t.Logf("  GetObject_1KB: ops/s=%.1f p50=%.1fms p95=%.1fms p99=%.1fms", getResult.OpsPerSec, getResult.P50Ms, getResult.P95Ms, getResult.P99Ms)
+		t.Cleanup(func() { Cleanup(t, client, bucket, seedKey) })
 
-	// --- Benchmark: PutGetDelete full CRUD cycle ---
-	t.Log("Benchmark: PutGetDelete_CRUD...")
-	start = time.Now()
-	crudLatencies, err := collectLatencies(benchmarkIterations, func() error {
-		crudKey := fmt.Sprintf("%sbench-crud-%d", testEnv.TestPrefix, time.Now().UnixNano())
+		before, _ := mc.Snapshot()
+		start := time.Now()
+
+		lr := runConcurrentLoad(concurrency, duration, func() error {
+			out, err := client.GetObject(context.TODO(), &s3.GetObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(seedKey),
+			})
+			if err != nil {
+				return err
+			}
+			io.Copy(io.Discard, out.Body)
+			out.Body.Close()
+			return nil
+		})
+
+		wallClock := time.Since(start)
+		after, _ := mc.Snapshot()
+		delta := ComputeDelta(before, after, wallClock)
+
+		result := toBenchmarkResult("GetObject_"+tier.Name, tier.Name, concurrency, lr, wallClock, delta)
+		report.Results = append(report.Results, result)
+
+		printBenchResult(t, result)
+	}
+
+	// =======================================================================
+	// 3. Full CRUD cycle load test (1KB)
+	// =======================================================================
+	t.Logf("=== PutGetDelete CRUD Cycle (%d concurrent, %ds) ===", concurrency, durationSec)
+
+	before, _ := mc.Snapshot()
+	start := time.Now()
+
+	crudLR := runConcurrentLoad(concurrency, duration, func() error {
+		key := fmt.Sprintf("%sbench-crud-%d", testEnv.TestPrefix, time.Now().UnixNano())
 		// Put
-		_, e := client.PutObject(context.TODO(), &s3.PutObjectInput{
+		_, err := client.PutObject(context.TODO(), &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
-			Key:    aws.String(crudKey),
+			Key:    aws.String(key),
 			Body:   strings.NewReader(strings.Repeat("Y", 1024)),
 		})
-		if e != nil {
-			return e
+		if err != nil {
+			return err
 		}
 		// Get
-		out, e := client.GetObject(context.TODO(), &s3.GetObjectInput{
+		out, err := client.GetObject(context.TODO(), &s3.GetObjectInput{
 			Bucket: aws.String(bucket),
-			Key:    aws.String(crudKey),
+			Key:    aws.String(key),
 		})
-		if e != nil {
-			return e
+		if err != nil {
+			return err
 		}
 		io.Copy(io.Discard, out.Body)
 		out.Body.Close()
 		// Delete
-		_, e = client.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
+		_, err = client.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
 			Bucket: aws.String(bucket),
-			Key:    aws.String(crudKey),
+			Key:    aws.String(key),
 		})
-		return e
+		return err
 	})
-	if err != nil {
-		t.Fatalf("CRUD benchmark failed: %v", err)
-	}
-	crudResult := toBenchmarkResult("PutGetDelete_CRUD", crudLatencies, time.Since(start))
-	report.Results = append(report.Results, crudResult)
-	t.Logf("  PutGetDelete_CRUD: ops/s=%.1f p50=%.1fms p95=%.1fms p99=%.1fms", crudResult.OpsPerSec, crudResult.P50Ms, crudResult.P95Ms, crudResult.P99Ms)
 
-	// --- Benchmark: ControlPlane PutBucketLifecycle ---
-	t.Log("Benchmark: PutBucketLifecycle...")
+	wallClock := time.Since(start)
+	after, _ := mc.Snapshot()
+	delta := ComputeDelta(before, after, wallClock)
+
+	crudResult := toBenchmarkResult("PutGetDelete_CRUD", "1KB", concurrency, crudLR, wallClock, delta)
+	report.Results = append(report.Results, crudResult)
+	printBenchResult(t, crudResult)
+
+	// =======================================================================
+	// 4. Control Plane: PutBucketLifecycle load test
+	// =======================================================================
+	t.Logf("=== PutBucketLifecycle (%d concurrent, %ds) ===", concurrency, durationSec)
 	t.Cleanup(func() {
 		client.DeleteBucketLifecycle(context.TODO(), &s3.DeleteBucketLifecycleInput{
 			Bucket: aws.String(bucket),
 		})
 	})
 
+	before, _ = mc.Snapshot()
 	start = time.Now()
-	lcLatencies, err := collectLatencies(benchmarkIterations, func() error {
-		_, e := client.PutBucketLifecycleConfiguration(context.TODO(), &s3.PutBucketLifecycleConfigurationInput{
+
+	lcLR := runConcurrentLoad(concurrency, duration, func() error {
+		_, err := client.PutBucketLifecycleConfiguration(context.TODO(), &s3.PutBucketLifecycleConfigurationInput{
 			Bucket: aws.String(bucket),
 			LifecycleConfiguration: &types.BucketLifecycleConfiguration{
 				Rules: []types.LifecycleRule{
@@ -204,16 +396,20 @@ func TestBenchmarkSuite(t *testing.T) {
 				},
 			},
 		})
-		return e
+		return err
 	})
-	if err != nil {
-		t.Fatalf("Lifecycle benchmark failed: %v", err)
-	}
-	lcResult := toBenchmarkResult("PutBucketLifecycle", lcLatencies, time.Since(start))
-	report.Results = append(report.Results, lcResult)
-	t.Logf("  PutBucketLifecycle: ops/s=%.1f p50=%.1fms p95=%.1fms p99=%.1fms", lcResult.OpsPerSec, lcResult.P50Ms, lcResult.P95Ms, lcResult.P99Ms)
 
-	// --- Write JSON report ---
+	wallClock = time.Since(start)
+	after, _ = mc.Snapshot()
+	delta = ComputeDelta(before, after, wallClock)
+
+	lcResult := toBenchmarkResult("PutBucketLifecycle", "N/A", concurrency, lcLR, wallClock, delta)
+	report.Results = append(report.Results, lcResult)
+	printBenchResult(t, lcResult)
+
+	// =======================================================================
+	// 5. Write JSON report
+	// =======================================================================
 	reportJSON, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		t.Fatalf("Failed to marshal benchmark report: %v", err)
@@ -221,20 +417,45 @@ func TestBenchmarkSuite(t *testing.T) {
 
 	reportPath := "benchmark_report.json"
 	if err := os.WriteFile(reportPath, reportJSON, 0644); err != nil {
-		t.Logf("Warning: failed to write benchmark report to %s: %v", reportPath, err)
+		t.Logf("Warning: failed to write report to %s: %v", reportPath, err)
 	} else {
 		t.Logf("Benchmark report written to %s", reportPath)
 	}
 
-	// Print summary table
+	// Print final summary table
 	fmt.Println()
-	fmt.Println("========================================")
+	fmt.Println("================================================================================")
 	fmt.Println("  Benchmark Summary")
-	fmt.Println("========================================")
-	fmt.Printf("  %-25s %8s %8s %8s %8s %8s\n", "Name", "Ops", "ops/s", "p50(ms)", "p95(ms)", "p99(ms)")
-	fmt.Println("  " + strings.Repeat("-", 73))
+	fmt.Printf("  Concurrency: %d | Duration per test: %ds\n", concurrency, durationSec)
+	fmt.Println("================================================================================")
+	fmt.Printf("  %-25s %6s %6s %8s %8s %8s %8s %8s %6s\n",
+		"Name", "Size", "Ops", "ops/s", "p50(ms)", "p95(ms)", "p99(ms)", "max(ms)", "Errs")
+	fmt.Println("  " + strings.Repeat("-", 94))
 	for _, r := range report.Results {
-		fmt.Printf("  %-25s %8d %8.1f %8.1f %8.1f %8.1f\n", r.Name, r.Ops, r.OpsPerSec, r.P50Ms, r.P95Ms, r.P99Ms)
+		fmt.Printf("  %-25s %6s %6d %8.1f %8.1f %8.1f %8.1f %8.1f %6d\n",
+			r.Name, r.PayloadSize, r.TotalOps, r.OpsPerSec, r.P50Ms, r.P95Ms, r.P99Ms, r.MaxMs, r.Errors)
 	}
-	fmt.Println("========================================")
+	fmt.Println("================================================================================")
+	fmt.Println()
+
+	// Print system metrics summary
+	fmt.Println("  System Metrics (per benchmark):")
+	fmt.Printf("  %-25s %8s %10s %10s %10s %10s\n",
+		"Name", "CPU(%)", "Mem\u0394(MB)", "PeakMem", "Gortn\u0394", "HTTP\u0394")
+	fmt.Println("  " + strings.Repeat("-", 78))
+	for _, r := range report.Results {
+		fmt.Printf("  %-25s %8.1f %10.1f %10.1f %10.0f %10.0f\n",
+			r.Name, r.System.CPUUsagePercent, r.System.MemoryDeltaMB,
+			r.System.PeakResidentMB, r.System.GoroutineDelta, r.System.HTTPRequestsDelta)
+	}
+	fmt.Println("================================================================================")
+}
+
+func printBenchResult(t *testing.T, r BenchmarkResult) {
+	t.Logf("  ops=%d  ops/s=%.1f  p50=%.1fms  p95=%.1fms  p99=%.1fms  max=%.1fms  errors=%d",
+		r.TotalOps, r.OpsPerSec, r.P50Ms, r.P95Ms, r.P99Ms, r.MaxMs, r.Errors)
+	t.Logf("  [system] CPU=%.1f%%  Mem\u0394=%.1fMB  PeakMem=%.1fMB  Goroutine\u0394=%.0f  HTTP\u0394=%.0f",
+		r.System.CPUUsagePercent, r.System.MemoryDeltaMB,
+		r.System.PeakResidentMB, r.System.GoroutineDelta, r.System.HTTPRequestsDelta)
+	t.Log("")
 }
