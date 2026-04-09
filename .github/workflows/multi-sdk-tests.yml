@@ -373,6 +373,7 @@ jobs:
           GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
           TEST_PREFIX: "sdk-javav2-${{ github.run_id }}/"
+          AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
         run: mvn test -B 2>&1 | tee test-output.txt
 
       - name: Upload Results

@@ -192,10 +192,12 @@ func main() {
 			if config.Config.ProxyAccessKey == "" || config.Config.ProxySecretKey == "" {
 				slog.Warn("Proxy HMAC credentials not set! Re-signing skipped. Signature will fail at GCS.")
 			} else {
-				payloadHash := req.Header.Get("X-Amz-Content-Sha256")
-				if payloadHash == "" {
-					payloadHash = "UNSIGNED-PAYLOAD"
-				}
+				// Always use UNSIGNED-PAYLOAD for re-signing.
+				// Some SDKs (Go V1, Java V2) compute the actual body SHA256,
+				// but GCS HMAC may not verify body hashes correctly through
+				// the reverse proxy. UNSIGNED-PAYLOAD works universally.
+				payloadHash := "UNSIGNED-PAYLOAD"
+				req.Header.Set("X-Amz-Content-Sha256", payloadHash)
 
 				awsCreds := aws.Credentials{
 					AccessKeyID:     config.Config.ProxyAccessKey,

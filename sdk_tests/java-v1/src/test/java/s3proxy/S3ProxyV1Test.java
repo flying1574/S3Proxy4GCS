@@ -184,8 +184,8 @@ public class S3ProxyV1Test {
             BucketCrossOriginConfiguration cors = new BucketCrossOriginConfiguration()
                     .withRules(new CORSRule()
                             .withAllowedMethods(java.util.Arrays.asList(CORSRule.AllowedMethods.GET, CORSRule.AllowedMethods.PUT))
-                            .withAllowedOrigins("https://javav1-test.example.com")
-                            .withAllowedHeaders("Authorization")
+                            .withAllowedOrigins(java.util.Arrays.asList("https://javav1-test.example.com"))
+                            .withAllowedHeaders(java.util.Arrays.asList("Authorization"))
                             .withMaxAgeSeconds(3600));
             s3.setBucketCrossOriginConfiguration(bucket, cors);
 
