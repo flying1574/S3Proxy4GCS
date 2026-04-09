@@ -122,6 +122,31 @@ func TestMultipartUpload(t *testing.T) {
 	}
 }
 
+func TestStorageClass(t *testing.T) {
+	client := NewS3Client(t, testEnv)
+	bucket := testEnv.TestBucket
+	key := GenerateTestKey(testEnv, "gov1-storageclass")
+
+	t.Cleanup(func() { Cleanup(t, client, bucket, key) })
+
+	_, err := client.PutObject(&s3.PutObjectInput{
+		Bucket:       aws.String(bucket),
+		Key:          aws.String(key),
+		Body:         strings.NewReader("storage class test"),
+		StorageClass: aws.String("STANDARD_IA"),
+	})
+	if err != nil {
+		t.Fatalf("PutObject with STANDARD_IA failed: %v", err)
+	}
+
+	_, err = client.HeadObject(&s3.HeadObjectInput{
+		Bucket: aws.String(bucket), Key: aws.String(key),
+	})
+	if err != nil {
+		t.Fatalf("HeadObject failed: %v", err)
+	}
+}
+
 func TestListObjectsV2(t *testing.T) {
 	client := NewS3Client(t, testEnv)
 	bucket := testEnv.TestBucket

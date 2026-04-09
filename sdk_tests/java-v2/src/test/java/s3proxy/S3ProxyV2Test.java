@@ -127,6 +127,24 @@ public class S3ProxyV2Test {
         }
     }
 
+    @Test
+    @Order(4)
+    void testStorageClass() {
+        String key = testKey("storageclass");
+        try {
+            s3.putObject(PutObjectRequest.builder()
+                            .bucket(bucket).key(key)
+                            .storageClass(StorageClass.STANDARD_IA)
+                            .build(),
+                    RequestBody.fromString("storage class test"));
+
+            var head = s3.headObject(HeadObjectRequest.builder().bucket(bucket).key(key).build());
+            assertTrue(head.contentLength() > 0);
+        } finally {
+            s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+        }
+    }
+
     // ---- Control Plane ----
 
     @Test
@@ -186,6 +204,39 @@ public class S3ProxyV2Test {
 
     @Test
     @Order(12)
+    void testLoggingCRUD() {
+        try {
+            s3.putBucketLogging(PutBucketLoggingRequest.builder()
+                    .bucket(bucket)
+                    .bucketLoggingStatus(BucketLoggingStatus.builder()
+                            .loggingEnabled(LoggingEnabled.builder()
+                                    .targetBucket(bucket)
+                                    .targetPrefix("javav2-logs/")
+                                    .build())
+                            .build())
+                    .build());
+
+            var got = s3.getBucketLogging(GetBucketLoggingRequest.builder().bucket(bucket).build());
+            assertNotNull(got.loggingEnabled());
+
+            // Clear logging
+            s3.putBucketLogging(PutBucketLoggingRequest.builder()
+                    .bucket(bucket)
+                    .bucketLoggingStatus(BucketLoggingStatus.builder().build())
+                    .build());
+        } catch (Exception e) {
+            try {
+                s3.putBucketLogging(PutBucketLoggingRequest.builder()
+                        .bucket(bucket)
+                        .bucketLoggingStatus(BucketLoggingStatus.builder().build())
+                        .build());
+            } catch (Exception ignored) {}
+            throw e;
+        }
+    }
+
+    @Test
+    @Order(13)
     void testWebsiteCRUD() {
         try {
             s3.putBucketWebsite(PutBucketWebsiteRequest.builder()
@@ -208,7 +259,7 @@ public class S3ProxyV2Test {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void testTaggingCRUD() {
         String key = testKey("tagging");
         try {

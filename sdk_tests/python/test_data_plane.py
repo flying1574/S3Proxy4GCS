@@ -99,14 +99,3 @@ class TestStorageClass:
         finally:
             s3_client.delete_object(Bucket=bucket, Key=test_key)
 
-
-class TestVersioning:
-    def test_object_versions(self, s3_client, bucket, test_key):
-        try:
-            s3_client.put_object(Bucket=bucket, Key=test_key, Body=b"v1")
-            s3_client.put_object(Bucket=bucket, Key=test_key, Body=b"v2")
-
-            head = s3_client.head_object(Bucket=bucket, Key=test_key)
-            assert head["ResponseMetadata"]["HTTPStatusCode"] == 200
-        finally:
-            s3_client.delete_object(Bucket=bucket, Key=test_key)

@@ -134,6 +134,25 @@ public class S3ProxyV1Test {
         }
     }
 
+    @Test
+    @Order(4)
+    void testStorageClass() {
+        String key = testKey("storageclass");
+        try {
+            ObjectMetadata metadata = new ObjectMetadata();
+            metadata.setContentLength(18);
+            PutObjectRequest putReq = new PutObjectRequest(bucket, key,
+                    new ByteArrayInputStream("storage class test".getBytes(StandardCharsets.UTF_8)), metadata);
+            putReq.setStorageClass("STANDARD_IA");
+            s3.putObject(putReq);
+
+            ObjectMetadata head = s3.getObjectMetadata(bucket, key);
+            assertTrue(head.getContentLength() > 0);
+        } finally {
+            s3.deleteObject(bucket, key);
+        }
+    }
+
     // ---- Control Plane ----
 
     @Test
@@ -182,6 +201,30 @@ public class S3ProxyV1Test {
 
     @Test
     @Order(12)
+    void testLoggingCRUD() {
+        try {
+            BucketLoggingConfiguration loggingConfig = new BucketLoggingConfiguration(bucket, "javav1-logs/");
+            SetBucketLoggingConfigurationRequest putReq =
+                    new SetBucketLoggingConfigurationRequest(bucket, loggingConfig);
+            s3.setBucketLoggingConfiguration(putReq);
+
+            BucketLoggingConfiguration got = s3.getBucketLoggingConfiguration(bucket);
+            assertNotNull(got.getDestinationBucketName());
+
+            // Clear logging
+            s3.setBucketLoggingConfiguration(
+                    new SetBucketLoggingConfigurationRequest(bucket, new BucketLoggingConfiguration()));
+        } catch (Exception e) {
+            try {
+                s3.setBucketLoggingConfiguration(
+                        new SetBucketLoggingConfigurationRequest(bucket, new BucketLoggingConfiguration()));
+            } catch (Exception ignored) {}
+            throw e;
+        }
+    }
+
+    @Test
+    @Order(13)
     void testWebsiteCRUD() {
         try {
             BucketWebsiteConfiguration website = new BucketWebsiteConfiguration("index.html", "error.html");
@@ -198,7 +241,7 @@ public class S3ProxyV1Test {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void testTaggingCRUD() {
         String key = testKey("tagging");
         try {

@@ -190,37 +190,3 @@ func TestStorageClass(t *testing.T) {
 		t.Fatalf("HeadObject failed: %v", err)
 	}
 }
-
-func TestVersioning(t *testing.T) {
-	client := NewS3Client(t, testEnv)
-	bucket := testEnv.TestBucket
-	key := GenerateTestKey(testEnv, "gov2-versioned")
-
-	t.Cleanup(func() { Cleanup(t, client, bucket, key) })
-
-	_, err := client.PutObject(context.TODO(), &s3.PutObjectInput{
-		Bucket: aws.String(bucket), Key: aws.String(key),
-		Body: strings.NewReader("version 1"),
-	})
-	if err != nil {
-		t.Fatalf("PutObject v1 failed: %v", err)
-	}
-
-	_, err = client.PutObject(context.TODO(), &s3.PutObjectInput{
-		Bucket: aws.String(bucket), Key: aws.String(key),
-		Body: strings.NewReader("version 2"),
-	})
-	if err != nil {
-		t.Fatalf("PutObject v2 failed: %v", err)
-	}
-
-	headOut, err := client.HeadObject(context.TODO(), &s3.HeadObjectInput{
-		Bucket: aws.String(bucket), Key: aws.String(key),
-	})
-	if err != nil {
-		t.Fatalf("HeadObject failed: %v", err)
-	}
-	if headOut.VersionId != nil {
-		t.Logf("VersionId: %s", *headOut.VersionId)
-	}
-}

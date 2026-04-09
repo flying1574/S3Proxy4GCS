@@ -3,6 +3,7 @@ package translate
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"cloud.google.com/go/storage"
 )
@@ -164,6 +165,12 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
+// parseS3Date parses an S3 date string (yyyy-mm-dd or yyyy-mm-ddT...) into a time.Time.
+func parseS3Date(s3Date string) (time.Time, error) {
+	dateStr := formatDateS3toGCS(s3Date) // extract yyyy-mm-dd
+	return time.Parse("2006-01-02", dateStr)
+}
+
 // TranslateS3ToGCSLifecycle converts S3 LifecycleConfiguration directly to a GCS SDK storage.Lifecycle struct,
 // bypassing the intermediate JSON representation to avoid field-name mismatches.
 func TranslateS3ToGCSLifecycle(s3Cfg *LifecycleConfiguration) (*storage.Lifecycle, error) {
@@ -201,6 +208,13 @@ func TranslateS3ToGCSLifecycle(s3Cfg *LifecycleConfiguration) (*storage.Lifecycl
 			if s3Rule.Expiration.Days != nil {
 				rule.Condition.AgeInDays = int64(*s3Rule.Expiration.Days)
 			}
+			if s3Rule.Expiration.Date != nil {
+				parsed, err := parseS3Date(*s3Rule.Expiration.Date)
+				if err != nil {
+					return nil, fmt.Errorf("invalid Expiration Date %q: %w", *s3Rule.Expiration.Date, err)
+				}
+				rule.Condition.CreatedBefore = parsed
+			}
 			lifecycle.Rules = append(lifecycle.Rules, rule)
 		}
 
@@ -215,6 +229,13 @@ func TranslateS3ToGCSLifecycle(s3Cfg *LifecycleConfiguration) (*storage.Lifecycl
 			applySDKFilter(s3Rule.Filter, &rule.Condition)
 			if trans.Days != nil {
 				rule.Condition.AgeInDays = int64(*trans.Days)
+			}
+			if trans.Date != nil {
+				parsed, err := parseS3Date(*trans.Date)
+				if err != nil {
+					return nil, fmt.Errorf("invalid Transition Date %q: %w", *trans.Date, err)
+				}
+				rule.Condition.CreatedBefore = parsed
 			}
 			lifecycle.Rules = append(lifecycle.Rules, rule)
 		}

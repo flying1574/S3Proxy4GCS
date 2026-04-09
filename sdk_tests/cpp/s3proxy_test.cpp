@@ -12,12 +12,22 @@
 #include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
 #include <aws/s3/model/ListObjectsV2Request.h>
+#include <aws/s3/model/CreateMultipartUploadRequest.h>
+#include <aws/s3/model/UploadPartRequest.h>
+#include <aws/s3/model/CompleteMultipartUploadRequest.h>
+#include <aws/s3/model/CompletedMultipartUpload.h>
+#include <aws/s3/model/CompletedPart.h>
 #include <aws/s3/model/PutBucketLifecycleConfigurationRequest.h>
 #include <aws/s3/model/GetBucketLifecycleConfigurationRequest.h>
 #include <aws/s3/model/DeleteBucketLifecycleRequest.h>
 #include <aws/s3/model/PutBucketCorsRequest.h>
 #include <aws/s3/model/GetBucketCorsRequest.h>
 #include <aws/s3/model/DeleteBucketCorsRequest.h>
+#include <aws/s3/model/PutBucketLoggingRequest.h>
+#include <aws/s3/model/GetBucketLoggingRequest.h>
+#include <aws/s3/model/PutBucketWebsiteRequest.h>
+#include <aws/s3/model/GetBucketWebsiteRequest.h>
+#include <aws/s3/model/DeleteBucketWebsiteRequest.h>
 #include <aws/s3/model/PutObjectTaggingRequest.h>
 #include <aws/s3/model/GetObjectTaggingRequest.h>
 #include <aws/s3/model/DeleteObjectTaggingRequest.h>
@@ -165,6 +175,98 @@ TEST_F(S3ProxyTest, ListObjectsV2) {
     }
 }
 
+TEST_F(S3ProxyTest, MultipartUpload) {
+    auto key = MakeTestKey(prefix, "multipart");
+    std::string part1(5 * 1024 * 1024, 'A'); // 5MB minimum
+    std::string part2 = "Final part";
+
+    Aws::S3::Model::CreateMultipartUploadRequest createReq;
+    createReq.SetBucket(bucket);
+    createReq.SetKey(key);
+    auto createResult = s3->CreateMultipartUpload(createReq);
+    ASSERT_TRUE(createResult.IsSuccess()) << createResult.GetError().GetMessage();
+    auto uploadId = createResult.GetResult().GetUploadId();
+
+    // Upload Part 1
+    Aws::S3::Model::UploadPartRequest up1Req;
+    up1Req.SetBucket(bucket);
+    up1Req.SetKey(key);
+    up1Req.SetUploadId(uploadId);
+    up1Req.SetPartNumber(1);
+    up1Req.SetContentLength(part1.size());
+    auto body1 = Aws::MakeShared<Aws::StringStream>("up1");
+    *body1 << part1;
+    up1Req.SetBody(body1);
+    auto up1Result = s3->UploadPart(up1Req);
+    ASSERT_TRUE(up1Result.IsSuccess()) << up1Result.GetError().GetMessage();
+
+    // Upload Part 2
+    Aws::S3::Model::UploadPartRequest up2Req;
+    up2Req.SetBucket(bucket);
+    up2Req.SetKey(key);
+    up2Req.SetUploadId(uploadId);
+    up2Req.SetPartNumber(2);
+    up2Req.SetContentLength(part2.size());
+    auto body2 = Aws::MakeShared<Aws::StringStream>("up2");
+    *body2 << part2;
+    up2Req.SetBody(body2);
+    auto up2Result = s3->UploadPart(up2Req);
+    ASSERT_TRUE(up2Result.IsSuccess()) << up2Result.GetError().GetMessage();
+
+    // Complete
+    Aws::S3::Model::CompletedPart cp1;
+    cp1.SetPartNumber(1);
+    cp1.SetETag(up1Result.GetResult().GetETag());
+    Aws::S3::Model::CompletedPart cp2;
+    cp2.SetPartNumber(2);
+    cp2.SetETag(up2Result.GetResult().GetETag());
+
+    Aws::S3::Model::CompletedMultipartUpload completed;
+    completed.AddParts(cp1);
+    completed.AddParts(cp2);
+
+    Aws::S3::Model::CompleteMultipartUploadRequest completeReq;
+    completeReq.SetBucket(bucket);
+    completeReq.SetKey(key);
+    completeReq.SetUploadId(uploadId);
+    completeReq.SetMultipartUpload(completed);
+    auto completeResult = s3->CompleteMultipartUpload(completeReq);
+    ASSERT_TRUE(completeResult.IsSuccess()) << completeResult.GetError().GetMessage();
+
+    // Verify merged size
+    Aws::S3::Model::HeadObjectRequest headReq;
+    headReq.SetBucket(bucket);
+    headReq.SetKey(key);
+    auto headResult = s3->HeadObject(headReq);
+    ASSERT_TRUE(headResult.IsSuccess());
+    ASSERT_EQ(headResult.GetResult().GetContentLength(),
+              static_cast<long long>(part1.size() + part2.size()));
+
+    DeleteKey(key);
+}
+
+TEST_F(S3ProxyTest, StorageClass) {
+    auto key = MakeTestKey(prefix, "storageclass");
+
+    Aws::S3::Model::PutObjectRequest putReq;
+    putReq.SetBucket(bucket);
+    putReq.SetKey(key);
+    putReq.SetStorageClass(Aws::S3::Model::StorageClass::STANDARD_IA);
+    auto body = Aws::MakeShared<Aws::StringStream>("put");
+    *body << "storage class test";
+    putReq.SetBody(body);
+    auto putResult = s3->PutObject(putReq);
+    ASSERT_TRUE(putResult.IsSuccess()) << putResult.GetError().GetMessage();
+
+    Aws::S3::Model::HeadObjectRequest headReq;
+    headReq.SetBucket(bucket);
+    headReq.SetKey(key);
+    auto headResult = s3->HeadObject(headReq);
+    ASSERT_TRUE(headResult.IsSuccess());
+
+    DeleteKey(key);
+}
+
 // ---- Control Plane ----
 
 TEST_F(S3ProxyTest, LifecycleCRUD) {
@@ -262,6 +364,61 @@ TEST_F(S3ProxyTest, TaggingCRUD) {
     s3->DeleteObjectTagging(delTagReq);
 
     DeleteKey(key);
+}
+
+TEST_F(S3ProxyTest, LoggingCRUD) {
+    Aws::S3::Model::LoggingEnabled logging;
+    logging.SetTargetBucket(bucket);
+    logging.SetTargetPrefix("cpp-logs/");
+
+    Aws::S3::Model::BucketLoggingStatus loggingStatus;
+    loggingStatus.SetLoggingEnabled(logging);
+
+    Aws::S3::Model::PutBucketLoggingRequest putReq;
+    putReq.SetBucket(bucket);
+    putReq.SetBucketLoggingStatus(loggingStatus);
+    auto putResult = s3->PutBucketLogging(putReq);
+    ASSERT_TRUE(putResult.IsSuccess()) << putResult.GetError().GetMessage();
+
+    Aws::S3::Model::GetBucketLoggingRequest getReq;
+    getReq.SetBucket(bucket);
+    auto getResult = s3->GetBucketLogging(getReq);
+    ASSERT_TRUE(getResult.IsSuccess());
+    // LoggingEnabled should be set
+    ASSERT_FALSE(getResult.GetResult().GetLoggingEnabled().GetTargetBucket().empty());
+
+    // Clear logging
+    Aws::S3::Model::PutBucketLoggingRequest clearReq;
+    clearReq.SetBucket(bucket);
+    clearReq.SetBucketLoggingStatus(Aws::S3::Model::BucketLoggingStatus());
+    s3->PutBucketLogging(clearReq);
+}
+
+TEST_F(S3ProxyTest, WebsiteCRUD) {
+    Aws::S3::Model::IndexDocument indexDoc;
+    indexDoc.SetSuffix("index.html");
+    Aws::S3::Model::ErrorDocument errorDoc;
+    errorDoc.SetKey("error.html");
+
+    Aws::S3::Model::WebsiteConfiguration websiteConfig;
+    websiteConfig.SetIndexDocument(indexDoc);
+    websiteConfig.SetErrorDocument(errorDoc);
+
+    Aws::S3::Model::PutBucketWebsiteRequest putReq;
+    putReq.SetBucket(bucket);
+    putReq.SetWebsiteConfiguration(websiteConfig);
+    auto putResult = s3->PutBucketWebsite(putReq);
+    ASSERT_TRUE(putResult.IsSuccess()) << putResult.GetError().GetMessage();
+
+    Aws::S3::Model::GetBucketWebsiteRequest getReq;
+    getReq.SetBucket(bucket);
+    auto getResult = s3->GetBucketWebsite(getReq);
+    ASSERT_TRUE(getResult.IsSuccess());
+    ASSERT_EQ(getResult.GetResult().GetIndexDocument().GetSuffix(), "index.html");
+
+    Aws::S3::Model::DeleteBucketWebsiteRequest delReq;
+    delReq.SetBucket(bucket);
+    s3->DeleteBucketWebsite(delReq);
 }
 
 } // namespace

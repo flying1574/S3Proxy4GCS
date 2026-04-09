@@ -188,12 +188,6 @@ func main() {
 			shouldResign = true
 		}
 
-		// 2. Versioning Interop (Egress - Must be set before re-signing if we re-sign!)
-		if strings.Contains(req.URL.RawQuery, "versions") {
-			req.Header.Set("x-amz-interop-list-objects-format", "enabled")
-			slog.Info("Injected version interop header for ListObjectVersions")
-		}
-
 		if shouldResign {
 			if config.Config.ProxyAccessKey == "" || config.Config.ProxySecretKey == "" {
 				slog.Warn("Proxy HMAC credentials not set! Re-signing skipped. Signature will fail at GCS.")
@@ -227,11 +221,6 @@ func main() {
 			slog.Debug("Response Headers received from GCS", "headers", resp.Header)
 		}
 
-		// 3. Versioning Interop (Ingress)
-		if gen := resp.Header.Get("x-goog-generation"); gen != "" {
-			resp.Header.Set("x-amz-version-id", gen)
-			slog.Info("Mapped x-goog-generation to x-amz-version-id", "generation", gen)
-		}
 		return nil
 	}
 
@@ -424,6 +413,26 @@ func handleS3Request(w http.ResponseWriter, r *http.Request) {
 	log := reqLogger(r.Context())
 	log.Info("Received S3 Request", "method", r.Method, "uri", r.RequestURI)
 
+	// Reject aws-chunked requests early.
+	// Modern AWS SDKs (Go V2, Python boto3, Java V2) may default to Flexible Checksums,
+	// which wraps the payload in aws-chunked Transfer-Encoding with checksum trailers.
+	// GCS does not support aws-chunked framing, causing silent signature or body-parse failures.
+	// Users must set AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED on their SDK client.
+	if ce := r.Header.Get("Content-Encoding"); strings.Contains(ce, "aws-chunked") {
+		log.Warn("Rejected aws-chunked request: GCS does not support Flexible Checksums trailers. "+
+			"Client must set AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED",
+			"content-encoding", ce,
+			"method", r.Method,
+			"uri", r.RequestURI,
+			"user-agent", r.Header.Get("User-Agent"),
+		)
+		writeS3Error(w, http.StatusBadRequest, "InvalidRequest",
+			"This proxy does not support aws-chunked Transfer-Encoding (Flexible Checksums). "+
+				"Please set the environment variable AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED "+
+				"or configure your SDK client to disable automatic checksum trailers.")
+		return
+	}
+
 	hasQueryParam := func(key string) bool {
 		for k := range r.URL.Query() {
 			if strings.EqualFold(k, key) {
@@ -512,7 +521,6 @@ type dryRunTransport struct{}
 func (t *dryRunTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	slog.Info("[DRY_RUN] ReverseProxy intercepted", "method", req.Method, "url", req.URL.String())
 	slog.Debug("[DRY_RUN] Header StorageClass", "class", req.Header.Get("x-amz-storage-class"))
-	slog.Debug("[DRY_RUN] Header VersionFormat", "format", req.Header.Get("x-amz-interop-list-objects-format"))
 
 	// Return a synthetic response
 	resp := &http.Response{
@@ -522,11 +530,6 @@ func (t *dryRunTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		ProtoMinor: 1,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader("Successfully proxied to GCS (DryRun - no real hits).")),
-	}
-
-	// For Versioning Interop verification (Simulate GCS response header)
-	if strings.Contains(req.URL.RawQuery, "versions") || req.Method == http.MethodHead {
-		resp.Header.Set("x-goog-generation", "1234567890")
 	}
 
 	return resp, nil
