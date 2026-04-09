@@ -47,6 +47,7 @@ public class S3ProxyV1Test {
                 .withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration(endpoint, "us-east-1"))
                 .withCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials(access, secret)))
                 .withPathStyleAccessEnabled(true)
+                .withChunkedEncodingDisabled(true)
                 .build();
     }
 

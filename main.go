@@ -211,9 +211,13 @@ func main() {
 				// Content-MD5: Go V1 SDK computes and sends it; if included in
 				//   signed headers, GCS HMAC may not expect it, causing SignatureDoesNotMatch.
 				// Expect: 100-continue can cause Transport/signing mismatches.
+				// Amz-Sdk-Invocation-Id / Amz-Sdk-Request: SDK tracking headers that
+				//   should not be forwarded to GCS.
 				req.Header.Del("User-Agent")
 				req.Header.Del("Content-Md5")
 				req.Header.Del("Expect")
+				req.Header.Del("Amz-Sdk-Invocation-Id")
+				req.Header.Del("Amz-Sdk-Request")
 
 				if err := signer.SignHTTP(req.Context(), awsCreds, req, payloadHash, "s3", "us-east-1", time.Now()); err != nil {
 					slog.Error("Failed to re-sign request", "error", err)

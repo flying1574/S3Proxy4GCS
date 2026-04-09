@@ -92,6 +92,9 @@ func NewS3Client(t *testing.T, env *Env) *s3.S3 {
 		Region:           aws.String("us-east-1"),
 		Credentials:      credentials.NewStaticCredentials(env.HMACAccess, env.HMACSecret, ""),
 		S3ForcePathStyle: aws.Bool(true),
+		// Disable MD5 computation to avoid Content-MD5 header issues with GCS HMAC re-signing
+		S3DisableContentMD5Validation: aws.Bool(true),
+		S3Disable100Continue:          aws.Bool(true),
 	})
 	if err != nil {
 		t.Fatalf("Failed to create session: %v", err)
