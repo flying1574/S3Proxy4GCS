@@ -211,18 +211,39 @@ func main() {
 				// Content-MD5: Go V1 SDK computes and sends it; if included in
 				//   signed headers, GCS HMAC may not expect it, causing SignatureDoesNotMatch.
 				// Expect: 100-continue can cause Transport/signing mismatches.
-				// Amz-Sdk-Invocation-Id / Amz-Sdk-Request: SDK tracking headers that
-				//   should not be forwarded to GCS.
+				// Amz-Sdk-Invocation-Id / Amz-Sdk-Request: SDK tracking headers.
+				// X-Amz-Decoded-Content-Length / X-Amz-Trailer: aws-chunked related.
+				// Content-Encoding: may contain aws-chunked from older SDKs.
 				req.Header.Del("User-Agent")
 				req.Header.Del("Content-Md5")
 				req.Header.Del("Expect")
 				req.Header.Del("Amz-Sdk-Invocation-Id")
 				req.Header.Del("Amz-Sdk-Request")
+				req.Header.Del("X-Amz-Decoded-Content-Length")
+				req.Header.Del("X-Amz-Trailer")
+				if ce := req.Header.Get("Content-Encoding"); strings.Contains(ce, "aws-chunked") {
+					req.Header.Del("Content-Encoding")
+				}
+
+				// Debug: log all headers before re-signing (temporary)
+				if config.Config.DebugLogging {
+					for k, v := range req.Header {
+						slog.Debug("Pre-sign header", "key", k, "value", v)
+					}
+				}
 
 				if err := signer.SignHTTP(req.Context(), awsCreds, req, payloadHash, "s3", "us-east-1", time.Now()); err != nil {
 					slog.Error("Failed to re-sign request", "error", err)
 				} else {
-					slog.Info("Successfully re-signed request for GCS")
+					// Log the signed headers for debugging signature issues
+					authHeader := req.Header.Get("Authorization")
+					slog.Info("Successfully re-signed request for GCS",
+						"method", req.Method,
+						"url", req.URL.String(),
+						"host", req.Host,
+						"content-length", req.ContentLength,
+						"auth_prefix", authHeader[:min(len(authHeader), 120)],
+					)
 				}
 			}
 		}
@@ -231,6 +252,16 @@ func main() {
 	reverseProxy.ModifyResponse = func(resp *http.Response) error {
 		if config.Config.DebugLogging {
 			slog.Debug("Response Headers received from GCS", "headers", resp.Header)
+		}
+
+		// Log 4xx/5xx errors from GCS for debugging
+		if resp.StatusCode >= 400 {
+			slog.Warn("GCS returned error",
+				"status", resp.StatusCode,
+				"method", resp.Request.Method,
+				"url", resp.Request.URL.String(),
+				"response_headers", resp.Header,
+			)
 		}
 
 		return nil

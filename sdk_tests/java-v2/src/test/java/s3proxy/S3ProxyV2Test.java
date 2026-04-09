@@ -45,6 +45,7 @@ public class S3ProxyV2Test {
                 .forcePathStyle(true)
                 .serviceConfiguration(S3Configuration.builder()
                         .checksumValidationEnabled(false)
+                        .chunkedEncodingEnabled(false)
                         .build())
                 .build();
     }
