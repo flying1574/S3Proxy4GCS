@@ -222,6 +222,7 @@ func main() {
 				req.Header.Del("Amz-Sdk-Request")
 				req.Header.Del("X-Amz-Decoded-Content-Length")
 				req.Header.Del("X-Amz-Trailer")
+				req.Header.Del("Accept-Encoding")
 				if ce := req.Header.Get("Content-Encoding"); strings.Contains(ce, "aws-chunked") {
 					req.Header.Del("Content-Encoding")
 				}
