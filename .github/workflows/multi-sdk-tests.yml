@@ -55,6 +55,15 @@ jobs:
         run: |
           IMAGE="${{ env.GAR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}"
           kubectl apply -f k8s/namespace.yaml
+          # Ensure credentials secret exists
+          kubectl create secret generic s3proxy-credentials \
+            --from-literal=PROXY_AWS_ACCESS_KEY_ID=${{ secrets.GCS_HMAC_ACCESS }} \
+            --from-literal=PROXY_AWS_SECRET_ACCESS_KEY=${{ secrets.GCS_HMAC_SECRET }} \
+            -n ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+          # Ensure bucket config secret exists
+          kubectl create secret generic s3proxy-config \
+            --from-literal=TARGET_BUCKET=${{ secrets.TEST_BUCKET }} \
+            -n ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
           kubectl set image deployment/s3proxy s3proxy="$IMAGE" -n ${{ env.K8S_NAMESPACE }}
@@ -420,9 +429,23 @@ jobs:
           echo "|-----|---------|--------|" >> $GITHUB_STEP_SUMMARY
 
           check_result() {
-            local name="$1" version="$2" dir="$3"
+            local name="$1" version="$2" dir="$3" job_name="$4"
             if [ -d "results/$dir" ]; then
-              if grep -qiE "FAIL|ERROR|FAILED" "results/$dir/test-output.txt" 2>/dev/null; then
+              local failed=false
+              # Go: check for "FAIL" at line start or "--- FAIL:"
+              if echo "$dir" | grep -q "go-"; then
+                grep -qE '^FAIL|--- FAIL:' "results/$dir/test-output.txt" 2>/dev/null && failed=true
+              # Python: check for "FAILED" or "ERROR" in pytest summary
+              elif echo "$dir" | grep -q "python"; then
+                grep -qE '(FAILED|ERROR)' "results/$dir/test-output.txt" 2>/dev/null && failed=true
+              # Java: check for "BUILD FAILURE" or "Tests run:.*Failures: [1-9]"
+              elif echo "$dir" | grep -q "java"; then
+                grep -qE 'BUILD FAILURE|Failures: [1-9]|Errors: [1-9]' "results/$dir/test-output.txt" 2>/dev/null && failed=true
+              # C++: check for "FAILED" from gtest
+              elif echo "$dir" | grep -q "cpp"; then
+                grep -qE '\[  FAILED  \]' "results/$dir/test-output.txt" 2>/dev/null && failed=true
+              fi
+              if $failed; then
                 echo "| $name | $version | :x: FAIL |" >> $GITHUB_STEP_SUMMARY
               else
                 echo "| $name | $version | :white_check_mark: PASS |" >> $GITHUB_STEP_SUMMARY
