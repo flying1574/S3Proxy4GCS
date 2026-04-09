@@ -144,7 +144,8 @@ jobs:
   test-go-v1:
     name: "Go V1 (v1.50.0)"
     runs-on: ubuntu-latest
-    needs: build-and-deploy
+    needs: test-go-v2
+    if: always() && needs.test-go-v2.result != 'cancelled'
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -193,7 +194,8 @@ jobs:
   test-python:
     name: "Python (boto3 1.42.71)"
     runs-on: ubuntu-latest
-    needs: build-and-deploy
+    needs: test-go-v1
+    if: always() && needs.test-go-v1.result != 'cancelled'
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -247,7 +249,8 @@ jobs:
   test-java-v1:
     name: "Java V1 (1.12.500)"
     runs-on: ubuntu-latest
-    needs: build-and-deploy
+    needs: test-python
+    if: always() && needs.test-python.result != 'cancelled'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -299,7 +302,8 @@ jobs:
   test-java-v2:
     name: "Java V2 (2.20.0)"
     runs-on: ubuntu-latest
-    needs: build-and-deploy
+    needs: test-java-v1
+    if: always() && needs.test-java-v1.result != 'cancelled'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -351,7 +355,8 @@ jobs:
   test-cpp:
     name: "C++ (1.11.765)"
     runs-on: ubuntu-latest
-    needs: build-and-deploy
+    needs: test-java-v2
+    if: always() && needs.test-java-v2.result != 'cancelled'
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

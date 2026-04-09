@@ -218,7 +218,7 @@ public class S3ProxyV2Test {
             s3.putObjectTagging(PutObjectTaggingRequest.builder()
                     .bucket(bucket).key(key)
                     .tagging(Tagging.builder().tagSet(
-                            Tag.builder().key("Env").value("JavaV2Test").build()
+                            software.amazon.awssdk.services.s3.model.Tag.builder().key("Env").value("JavaV2Test").build()
                     ).build()).build());
 
             var got = s3.getObjectTagging(GetObjectTaggingRequest.builder()

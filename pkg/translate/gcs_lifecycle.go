@@ -164,6 +164,104 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
+// TranslateS3ToGCSLifecycle converts S3 LifecycleConfiguration directly to a GCS SDK storage.Lifecycle struct,
+// bypassing the intermediate JSON representation to avoid field-name mismatches.
+func TranslateS3ToGCSLifecycle(s3Cfg *LifecycleConfiguration) (*storage.Lifecycle, error) {
+	var lifecycle storage.Lifecycle
+
+	for _, s3Rule := range s3Cfg.Rules {
+		if s3Rule.Status != "Enabled" {
+			continue
+		}
+
+		// Validate filter
+		if s3Rule.Filter != nil {
+			if s3Rule.Filter.ObjectSizeGreaterThan != nil || s3Rule.Filter.ObjectSizeLessThan != nil {
+				return nil, fmt.Errorf("ObjectSize filters are not supported by GCS Lifecycle translation")
+			}
+			if s3Rule.Filter.Tag != nil {
+				return nil, fmt.Errorf("Tag filters are not supported by GCS Lifecycle translation")
+			}
+			if s3Rule.Filter.And != nil {
+				if s3Rule.Filter.And.ObjectSizeGreaterThan != nil || s3Rule.Filter.And.ObjectSizeLessThan != nil {
+					return nil, fmt.Errorf("ObjectSize filters in And are not supported by GCS Lifecycle translation")
+				}
+				if len(s3Rule.Filter.And.Tags) > 0 {
+					return nil, fmt.Errorf("Tag filters in And are not supported by GCS Lifecycle translation")
+				}
+			}
+		}
+
+		// Translate Expiration
+		if s3Rule.Expiration != nil {
+			rule := storage.LifecycleRule{
+				Action: storage.LifecycleAction{Type: storage.DeleteAction},
+			}
+			applySDKFilter(s3Rule.Filter, &rule.Condition)
+			if s3Rule.Expiration.Days != nil {
+				rule.Condition.AgeInDays = int64(*s3Rule.Expiration.Days)
+			}
+			lifecycle.Rules = append(lifecycle.Rules, rule)
+		}
+
+		// Translate Transitions
+		for _, trans := range s3Rule.Transitions {
+			rule := storage.LifecycleRule{
+				Action: storage.LifecycleAction{
+					Type:         storage.SetStorageClassAction,
+					StorageClass: mapStorageClass(trans.StorageClass),
+				},
+			}
+			applySDKFilter(s3Rule.Filter, &rule.Condition)
+			if trans.Days != nil {
+				rule.Condition.AgeInDays = int64(*trans.Days)
+			}
+			lifecycle.Rules = append(lifecycle.Rules, rule)
+		}
+
+		// Translate NoncurrentVersionExpirations
+		if s3Rule.NoncurrentVersionExpirations != nil {
+			rule := storage.LifecycleRule{
+				Action: storage.LifecycleAction{Type: storage.DeleteAction},
+				Condition: storage.LifecycleCondition{
+					Liveness: storage.Archived,
+				},
+			}
+			if s3Rule.NoncurrentVersionExpirations.NoncurrentDays != nil {
+				rule.Condition.NumNewerVersions = int64(*s3Rule.NoncurrentVersionExpirations.NoncurrentDays)
+			}
+			applySDKFilter(s3Rule.Filter, &rule.Condition)
+			lifecycle.Rules = append(lifecycle.Rules, rule)
+		}
+
+		// Translate AbortIncompleteMultipartUpload
+		if s3Rule.AbortIncompleteMultipartUpload != nil && s3Rule.AbortIncompleteMultipartUpload.DaysAfterInitiation != nil {
+			rule := storage.LifecycleRule{
+				Action: storage.LifecycleAction{Type: storage.AbortIncompleteMPUAction},
+				Condition: storage.LifecycleCondition{
+					AgeInDays: int64(*s3Rule.AbortIncompleteMultipartUpload.DaysAfterInitiation),
+				},
+			}
+			lifecycle.Rules = append(lifecycle.Rules, rule)
+		}
+	}
+
+	return &lifecycle, nil
+}
+
+// applySDKFilter sets MatchesPrefix on a storage.LifecycleCondition from an S3 Filter.
+func applySDKFilter(f *Filter, c *storage.LifecycleCondition) {
+	if f == nil {
+		return
+	}
+	if f.Prefix != nil && *f.Prefix != "" {
+		c.MatchesPrefix = []string{*f.Prefix}
+	}
+	if f.And != nil && f.And.Prefix != nil && *f.And.Prefix != "" {
+		c.MatchesPrefix = append(c.MatchesPrefix, *f.And.Prefix)
+	}
+}
+
 // TranslateGCSToS3Lifecycle converts GCS storage.Lifecycle to S3 LifecycleConfiguration XML struct.
 func TranslateGCSToS3Lifecycle(gcsLifecycle storage.Lifecycle) *LifecycleConfiguration {
 	s3Cfg := &LifecycleConfiguration{}

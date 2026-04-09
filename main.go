@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -147,7 +146,9 @@ func main() {
 		}
 
 		// 1. Storage Class Translation & x-id Stripping (Hybrid Data-Plane)
-		shouldResign := false
+		// Always re-sign: the Director changes Host from proxy to GCS,
+		// so the original SigV4 signature (signed for localhost) is invalid.
+		shouldResign := true
 
 		sc := req.Header.Get("x-amz-storage-class")
 		if sc != "" && sc != "STANDARD" {
@@ -557,34 +558,24 @@ func handlePutLifecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Translate to GCS JSON
-	gcsJSON, err := translate.TranslateS3ToGCS(&s3Cfg)
+	// 3. Translate S3 XML directly to GCS SDK Lifecycle struct
+	storageLifecycle, err := translate.TranslateS3ToGCSLifecycle(&s3Cfg)
 	if err != nil {
-		log.Error("Failed to translate to GCS JSON for Lifecycle", "error", err)
-		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Lifecycle translation failed.")
+		log.Error("Failed to translate lifecycle to GCS SDK", "error", err)
+		writeS3Error(w, http.StatusBadRequest, "InvalidRequest", err.Error())
 		return
 	}
 
-	// 4. If DryRun is true, we just return the translated JSON (for local laptop testing)
+	// 4. If DryRun is true, return success without calling GCS
 	if config.Config.DryRun {
-		w.Header().Set("Content-Type", "application/xml")
 		w.WriteHeader(http.StatusOK)
-		w.Write(gcsJSON)
 		return
 	}
 
-	// 5. Unmarshal translated GCS JSON back into storage.Lifecycle interface if we want to use BucketHandle.Update
-	var storageLifecycle storage.Lifecycle
-	if err := json.Unmarshal(gcsJSON, &storageLifecycle); err != nil {
-		log.Error("Failed to unmarshal translated JSON into storage.Lifecycle", "error", err)
-		writeS3Error(w, http.StatusInternalServerError, "InternalError", "Internal translation error mapping to Go SDK.")
-		return
-	}
-
-	// 6. Execute Bucket Update via GCS SDK
+	// 5. Execute Bucket Update via GCS SDK
 	bucket := gcsClient.Bucket(config.Config.TargetBucket)
 	uattrs := storage.BucketAttrsToUpdate{
-		Lifecycle: &storageLifecycle,
+		Lifecycle: storageLifecycle,
 	}
 
 	err = timeGCSCall(r.Context(), "PutBucketLifecycle", func(ctx context.Context) error {

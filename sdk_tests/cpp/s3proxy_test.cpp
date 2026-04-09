@@ -74,7 +74,7 @@ protected:
         Aws::Auth::AWSCredentials creds(access, secret);
 
         s3 = std::make_shared<Aws::S3::S3Client>(
-            creds, nullptr, config,
+            creds, config,
             Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
             /* useVirtualAddressing */ false);
     }

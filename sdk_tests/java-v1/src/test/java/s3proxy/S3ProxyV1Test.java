@@ -143,7 +143,7 @@ public class S3ProxyV1Test {
             BucketLifecycleConfiguration config = new BucketLifecycleConfiguration()
                     .withRules(new BucketLifecycleConfiguration.Rule()
                             .withId("JavaV1-Exp")
-                            .withFilter(new LifecycleFilter(new LifecyclePrefixPredicate("javav1-test/")))
+                            .withPrefix("javav1-test/")
                             .withExpirationInDays(365)
                             .withStatus(BucketLifecycleConfiguration.ENABLED));
             s3.setBucketLifecycleConfiguration(bucket, config);
@@ -164,7 +164,7 @@ public class S3ProxyV1Test {
         try {
             BucketCrossOriginConfiguration cors = new BucketCrossOriginConfiguration()
                     .withRules(new CORSRule()
-                            .withAllowedMethods(CORSRule.AllowedMethods.GET, CORSRule.AllowedMethods.PUT)
+                            .withAllowedMethods(java.util.Arrays.asList(CORSRule.AllowedMethods.GET, CORSRule.AllowedMethods.PUT))
                             .withAllowedOrigins("https://javav1-test.example.com")
                             .withAllowedHeaders("Authorization")
                             .withMaxAgeSeconds(3600));
@@ -204,8 +204,8 @@ public class S3ProxyV1Test {
         try {
             s3.putObject(bucket, key, "tag test");
 
-            List<Tag> tags = new ArrayList<>();
-            tags.add(new Tag("Env", "JavaV1Test"));
+            List<com.amazonaws.services.s3.model.Tag> tags = new ArrayList<>();
+            tags.add(new com.amazonaws.services.s3.model.Tag("Env", "JavaV1Test"));
             s3.setObjectTagging(new SetObjectTaggingRequest(bucket, key,
                     new ObjectTagging(tags)));
 
