@@ -6,12 +6,19 @@ integration_tests/s3proxy4gcs_test_bin
 
 # Configuration
 .env
+*-key.json
 
 # Go workspace
 /vendor/
 
 # log
 log/
+
+# IDE / Tool cache
+.qoder/
+
+# Test artifacts
+e2e_tests/benchmark_report.json
 
 # OS Specific
 .DS_Store

@@ -20,11 +20,11 @@ type Settings struct {
 	DebugLogging          bool   // DebugLogging enables verbose output
 	MaxIdleConns          int
 	MaxIdleConnsPerHost   int
-	MaxConcurrentRequests int            // Throttle middleware limit; 0 = no limit
-	GCSCallTimeout        time.Duration   // Timeout for individual GCS SDK calls; 0 = no limit
-	ProxyAccessKey        string          // For re-signing
-	ProxySecretKey        string // For re-signing
-	JSONKey               string // Path to GCS Service Account JSON key
+	MaxConcurrentRequests int           // Throttle middleware limit; 0 = no limit
+	GCSCallTimeout        time.Duration // Timeout for individual GCS SDK calls; 0 = no limit
+	ProxyAccessKey        string        // For re-signing
+	ProxySecretKey        string        // For re-signing
+	JSONKey               string        // Path to GCS Service Account JSON key
 }
 
 var Config *Settings
