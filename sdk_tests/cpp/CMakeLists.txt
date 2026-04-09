@@ -6,18 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# AWS SDK C++ 1.11.765
-FetchContent_Declare(
-    aws-sdk-cpp
-    GIT_REPOSITORY https://github.com/aws/aws-sdk-cpp.git
-    GIT_TAG 1.11.765
-    GIT_SHALLOW TRUE
-)
-set(BUILD_ONLY "s3" CACHE STRING "" FORCE)
-set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
-set(AUTORUN_UNIT_TESTS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(aws-sdk-cpp)
-
 # Google Test
 FetchContent_Declare(
     googletest
@@ -27,6 +15,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
+# Find AWS SDK (installed via apt or vcpkg)
+find_package(AWSSDK REQUIRED COMPONENTS s3)
+
 enable_testing()
 
 add_executable(s3proxy_cpp_tests
@@ -35,8 +26,7 @@ add_executable(s3proxy_cpp_tests
 
 target_link_libraries(s3proxy_cpp_tests
     PRIVATE
-    aws-cpp-sdk-s3
-    aws-cpp-sdk-core
+    ${AWSSDK_LINK_LIBRARIES}
     GTest::gtest_main
 )
 

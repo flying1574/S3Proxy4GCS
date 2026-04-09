@@ -351,6 +351,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake g++ libcurl4-openssl-dev libssl-dev uuid-dev zlib1g-dev
+          # Install AWS SDK C++ via vcpkg
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git /tmp/vcpkg
+          /tmp/vcpkg/bootstrap-vcpkg.sh
+          /tmp/vcpkg/vcpkg install "aws-sdk-cpp[s3]" --triplet x64-linux
+          echo "CMAKE_TOOLCHAIN_FILE=/tmp/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
 
       - id: auth
         uses: google-github-actions/auth@v2
@@ -371,7 +376,7 @@ jobs:
       - name: Build Tests
         working-directory: sdk_tests/cpp
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=$CMAKE_TOOLCHAIN_FILE
           cmake --build build -j$(nproc)
 
       - name: Run Tests
