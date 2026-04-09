@@ -593,7 +593,6 @@ func handlePutLifecycle(w http.ResponseWriter, r *http.Request) {
 
 	log.Info("Successfully updated GCS bucket lifecycle", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Successfully proxied and applied lifecycle to GCS."))
 }
 
 func handleGetLifecycle(w http.ResponseWriter, r *http.Request) {
@@ -680,7 +679,7 @@ func handlePutCORS(w http.ResponseWriter, r *http.Request) {
 	// 4. In DryRun mode, just print/return success
 	if config.Config.DryRun {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Successfully proxied CORS to GCS (DryRun - no real hits)."))
+		
 		return
 	}
 
@@ -702,7 +701,6 @@ func handlePutCORS(w http.ResponseWriter, r *http.Request) {
 
 	log.Info("Successfully updated GCS bucket CORS", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Successfully proxied and applied CORS to GCS."))
 }
 
 func handleGetCORS(w http.ResponseWriter, r *http.Request) {
@@ -779,7 +777,7 @@ func handlePutLogging(w http.ResponseWriter, r *http.Request) {
 
 	if config.Config.DryRun {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Successfully proxied Logging to GCS (DryRun - no real hits)."))
+		
 		return
 	}
 
@@ -800,7 +798,6 @@ func handlePutLogging(w http.ResponseWriter, r *http.Request) {
 
 	log.Info("Successfully updated GCS bucket Logging", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Successfully proxied and applied Logging to GCS."))
 }
 
 func handleGetLogging(w http.ResponseWriter, r *http.Request) {
@@ -873,7 +870,7 @@ func handlePutWebsite(w http.ResponseWriter, r *http.Request) {
 
 	if config.Config.DryRun {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Successfully proxied Website to GCS (DryRun - no real hits)."))
+		
 		return
 	}
 
@@ -894,7 +891,6 @@ func handlePutWebsite(w http.ResponseWriter, r *http.Request) {
 
 	log.Info("Successfully updated GCS bucket Website", "bucket", config.Config.TargetBucket)
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Successfully proxied and applied Website to GCS."))
 }
 
 func handleGetWebsite(w http.ResponseWriter, r *http.Request) {
@@ -981,7 +977,7 @@ func handlePutObjectTagging(w http.ResponseWriter, r *http.Request) {
 	if config.Config.DryRun {
 		log.Info("[DRY_RUN] Would apply Tagging to GCS Object", "bucket", targetBucket, "object", targetObject)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Successfully proxied Tagging to GCS (DryRun - no real hits)."))
+		
 		return
 	}
 
@@ -1017,7 +1013,6 @@ func handlePutObjectTagging(w http.ResponseWriter, r *http.Request) {
 
 	log.Info("Successfully updated GCS Object Tagging", "bucket", targetBucket, "object", targetObject)
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Successfully proxied and applied Tagging to GCS."))
 }
 
 func handleGetObjectTagging(w http.ResponseWriter, r *http.Request) {

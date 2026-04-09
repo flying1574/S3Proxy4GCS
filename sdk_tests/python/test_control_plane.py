@@ -1,9 +1,12 @@
 """Control plane tests using Python boto3 SDK."""
+import time
+
 import pytest
 
 
 class TestLifecycleCRUD:
     def test_lifecycle(self, s3_client, bucket):
+        time.sleep(2)  # Allow GCS bucket state to settle between SDK jobs
         try:
             s3_client.put_bucket_lifecycle_configuration(
                 Bucket=bucket,
@@ -103,6 +106,7 @@ class TestWebsiteCRUD:
 
 class TestTaggingCRUD:
     def test_object_tagging(self, s3_client, bucket, test_key):
+        time.sleep(2)  # Allow GCS bucket state to settle
         try:
             s3_client.put_object(Bucket=bucket, Key=test_key, Body=b"tag test")
 

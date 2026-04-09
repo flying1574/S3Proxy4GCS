@@ -119,7 +119,14 @@ jobs:
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          sleep 5
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Proxy is healthy!"
+              break
+            fi
+            echo "Waiting for port-forward... ($i/20)"
+            sleep 2
+          done
 
       - name: Run Tests
         working-directory: sdk_tests/go-v2
@@ -169,7 +176,14 @@ jobs:
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          sleep 5
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Proxy is healthy!"
+              break
+            fi
+            echo "Waiting for port-forward... ($i/20)"
+            sleep 2
+          done
 
       - name: Run Tests
         working-directory: sdk_tests/go-v1
@@ -218,7 +232,14 @@ jobs:
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          sleep 5
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Proxy is healthy!"
+              break
+            fi
+            echo "Waiting for port-forward... ($i/20)"
+            sleep 2
+          done
 
       - name: Install Dependencies
         run: pip install -r sdk_tests/python/requirements.txt
@@ -275,7 +296,14 @@ jobs:
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          sleep 5
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Proxy is healthy!"
+              break
+            fi
+            echo "Waiting for port-forward... ($i/20)"
+            sleep 2
+          done
 
       - name: Run Tests
         working-directory: sdk_tests/java-v1
@@ -328,7 +356,14 @@ jobs:
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          sleep 5
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Proxy is healthy!"
+              break
+            fi
+            echo "Waiting for port-forward... ($i/20)"
+            sleep 2
+          done
 
       - name: Run Tests
         working-directory: sdk_tests/java-v2
@@ -385,7 +420,14 @@ jobs:
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          sleep 5
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Proxy is healthy!"
+              break
+            fi
+            echo "Waiting for port-forward... ($i/20)"
+            sleep 2
+          done
 
       - name: Build Tests
         working-directory: sdk_tests/cpp
@@ -401,6 +443,7 @@ jobs:
           GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
           TEST_PREFIX: "sdk-cpp-${{ github.run_id }}/"
+          AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
         run: |
           cd build
           ctest --output-on-failure -V 2>&1 | tee ../test-output.txt

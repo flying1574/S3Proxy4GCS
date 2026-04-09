@@ -203,7 +203,9 @@ public class S3ProxyV1Test {
     @Order(12)
     void testLoggingCRUD() {
         try {
-            BucketLoggingConfiguration loggingConfig = new BucketLoggingConfiguration(bucket, "javav1-logs/");
+            BucketLoggingConfiguration loggingConfig = new BucketLoggingConfiguration();
+            loggingConfig.setDestinationBucketName(bucket);
+            loggingConfig.setLogFilePrefix("javav1-logs/");
             SetBucketLoggingConfigurationRequest putReq =
                     new SetBucketLoggingConfigurationRequest(bucket, loggingConfig);
             s3.setBucketLoggingConfiguration(putReq);
