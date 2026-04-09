@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -242,7 +243,9 @@ func main() {
 						"url", req.URL.String(),
 						"host", req.Host,
 						"content-length", req.ContentLength,
-						"auth_prefix", authHeader[:min(len(authHeader), 120)],
+						"content-type", req.Header.Get("Content-Type"),
+						"x-amz-sha256", req.Header.Get("X-Amz-Content-Sha256"),
+						"authorization", authHeader,
 					)
 				}
 			}
@@ -256,11 +259,15 @@ func main() {
 
 		// Log 4xx/5xx errors from GCS for debugging
 		if resp.StatusCode >= 400 {
+			// Read response body for error details, then restore it
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			slog.Warn("GCS returned error",
 				"status", resp.StatusCode,
 				"method", resp.Request.Method,
 				"url", resp.Request.URL.String(),
-				"response_headers", resp.Header,
+				"error_body", string(bodyBytes[:min(len(bodyBytes), 500)]),
 			)
 		}
 
