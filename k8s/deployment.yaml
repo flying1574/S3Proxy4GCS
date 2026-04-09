@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: s3proxy
+  namespace: s3proxy-e2e
+  annotations:
+    iam.gke.io/gcp-service-account: s3proxy-test@cbs-poctest.iam.gserviceaccount.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: s3proxy
+  namespace: s3proxy-e2e
+  labels:
+    app: s3proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: s3proxy
+  template:
+    metadata:
+      labels:
+        app: s3proxy
+    spec:
+      serviceAccountName: s3proxy
+      containers:
+        - name: s3proxy
+          # Image tag is updated by CI via: kubectl set image deployment/s3proxy s3proxy=IMAGE
+          image: us-east1-docker.pkg.dev/cbs-poctest/s3proxy/s3proxy:latest
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8080"
+            - name: GCP_PROJECT_ID
+              value: "cbs-poctest"
+            - name: TARGET_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: s3proxy-config
+                  key: TARGET_BUCKET
+            - name: GCS_PREFIX
+              value: "s3proxy-test/"
+            - name: DRY_RUN
+              value: "false"
+            - name: DEBUG_LOGGING
+              value: "true"
+            - name: MAX_IDLE_CONNS
+              value: "1000"
+            - name: MAX_IDLE_CONNS_PER_HOST
+              value: "1000"
+            - name: MAX_CONCURRENT_REQUESTS
+              value: "1000"
+            - name: GCS_CALL_TIMEOUT_SEC
+              value: "30"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15

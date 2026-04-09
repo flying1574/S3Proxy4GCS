@@ -1,0 +1,267 @@
+/**
+ * S3Proxy functional tests using AWS SDK for C++ (1.11.765).
+ */
+#include <gtest/gtest.h>
+
+#include <aws/core/Aws.h>
+#include <aws/core/auth/AWSCredentials.h>
+#include <aws/core/client/ClientConfiguration.h>
+#include <aws/s3/S3Client.h>
+#include <aws/s3/model/PutObjectRequest.h>
+#include <aws/s3/model/GetObjectRequest.h>
+#include <aws/s3/model/HeadObjectRequest.h>
+#include <aws/s3/model/DeleteObjectRequest.h>
+#include <aws/s3/model/ListObjectsV2Request.h>
+#include <aws/s3/model/PutBucketLifecycleConfigurationRequest.h>
+#include <aws/s3/model/GetBucketLifecycleConfigurationRequest.h>
+#include <aws/s3/model/DeleteBucketLifecycleRequest.h>
+#include <aws/s3/model/PutBucketCorsRequest.h>
+#include <aws/s3/model/GetBucketCorsRequest.h>
+#include <aws/s3/model/DeleteBucketCorsRequest.h>
+#include <aws/s3/model/PutObjectTaggingRequest.h>
+#include <aws/s3/model/GetObjectTaggingRequest.h>
+#include <aws/s3/model/DeleteObjectTaggingRequest.h>
+
+#include <chrono>
+#include <cstdlib>
+#include <memory>
+#include <sstream>
+#include <string>
+
+namespace {
+
+std::string GetEnvOrFail(const char* name) {
+    const char* val = std::getenv(name);
+    if (!val || std::string(val).empty()) {
+        throw std::runtime_error(std::string("Missing env var: ") + name);
+    }
+    return std::string(val);
+}
+
+std::string GetEnvOrDefault(const char* name, const std::string& def = "") {
+    const char* val = std::getenv(name);
+    return (val && std::string(val).length() > 0) ? std::string(val) : def;
+}
+
+std::string MakeTestKey(const std::string& prefix, const std::string& suffix) {
+    auto now = std::chrono::system_clock::now().time_since_epoch();
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+    return prefix + "cpp-" + suffix + "-" + std::to_string(ns);
+}
+
+class S3ProxyTest : public ::testing::Test {
+protected:
+    static std::shared_ptr<Aws::S3::S3Client> s3;
+    static std::string bucket;
+    static std::string prefix;
+    static Aws::SDKOptions options;
+
+    static void SetUpTestSuite() {
+        Aws::InitAPI(options);
+
+        std::string endpoint = GetEnvOrFail("PROXY_ENDPOINT");
+        std::string access = GetEnvOrFail("GCS_HMAC_ACCESS");
+        std::string secret = GetEnvOrFail("GCS_HMAC_SECRET");
+        bucket = GetEnvOrFail("TEST_BUCKET");
+        prefix = GetEnvOrDefault("TEST_PREFIX");
+
+        Aws::Client::ClientConfiguration config;
+        config.endpointOverride = endpoint;
+        config.region = "us-east-1";
+        config.scheme = Aws::Http::Scheme::HTTP;
+        config.verifySSL = false;
+
+        Aws::Auth::AWSCredentials creds(access, secret);
+
+        s3 = std::make_shared<Aws::S3::S3Client>(
+            creds, nullptr, config,
+            Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+            /* useVirtualAddressing */ false);
+    }
+
+    static void TearDownTestSuite() {
+        s3.reset();
+        Aws::ShutdownAPI(options);
+    }
+
+    void DeleteKey(const std::string& key) {
+        Aws::S3::Model::DeleteObjectRequest req;
+        req.SetBucket(bucket);
+        req.SetKey(key);
+        s3->DeleteObject(req);
+    }
+};
+
+std::shared_ptr<Aws::S3::S3Client> S3ProxyTest::s3;
+std::string S3ProxyTest::bucket;
+std::string S3ProxyTest::prefix;
+Aws::SDKOptions S3ProxyTest::options;
+
+// ---- Data Plane ----
+
+TEST_F(S3ProxyTest, ObjectCRUD) {
+    auto key = MakeTestKey(prefix, "crud");
+    std::string content = "Hello from C++ SDK!";
+
+    // Put
+    Aws::S3::Model::PutObjectRequest putReq;
+    putReq.SetBucket(bucket);
+    putReq.SetKey(key);
+    auto body = Aws::MakeShared<Aws::StringStream>("put");
+    *body << content;
+    putReq.SetBody(body);
+    auto putResult = s3->PutObject(putReq);
+    ASSERT_TRUE(putResult.IsSuccess()) << putResult.GetError().GetMessage();
+
+    // Get
+    Aws::S3::Model::GetObjectRequest getReq;
+    getReq.SetBucket(bucket);
+    getReq.SetKey(key);
+    auto getResult = s3->GetObject(getReq);
+    ASSERT_TRUE(getResult.IsSuccess()) << getResult.GetError().GetMessage();
+    std::stringstream ss;
+    ss << getResult.GetResult().GetBody().rdbuf();
+    ASSERT_EQ(ss.str(), content);
+
+    // Head
+    Aws::S3::Model::HeadObjectRequest headReq;
+    headReq.SetBucket(bucket);
+    headReq.SetKey(key);
+    auto headResult = s3->HeadObject(headReq);
+    ASSERT_TRUE(headResult.IsSuccess());
+    ASSERT_GT(headResult.GetResult().GetContentLength(), 0);
+
+    // Delete
+    DeleteKey(key);
+
+    // Get after delete - should fail
+    auto getAfter = s3->GetObject(getReq);
+    ASSERT_FALSE(getAfter.IsSuccess());
+}
+
+TEST_F(S3ProxyTest, ListObjectsV2) {
+    std::string listPrefix = prefix + "cpp-list/";
+    std::vector<std::string> keys = {listPrefix + "a", listPrefix + "b", listPrefix + "c"};
+
+    for (const auto& key : keys) {
+        Aws::S3::Model::PutObjectRequest req;
+        req.SetBucket(bucket);
+        req.SetKey(key);
+        auto body = Aws::MakeShared<Aws::StringStream>("put");
+        *body << "list test";
+        req.SetBody(body);
+        ASSERT_TRUE(s3->PutObject(req).IsSuccess());
+    }
+
+    Aws::S3::Model::ListObjectsV2Request listReq;
+    listReq.SetBucket(bucket);
+    listReq.SetPrefix(listPrefix);
+    auto listResult = s3->ListObjectsV2(listReq);
+    ASSERT_TRUE(listResult.IsSuccess());
+    ASSERT_GE(listResult.GetResult().GetContents().size(), 3u);
+
+    for (const auto& key : keys) {
+        DeleteKey(key);
+    }
+}
+
+// ---- Control Plane ----
+
+TEST_F(S3ProxyTest, LifecycleCRUD) {
+    Aws::S3::Model::LifecycleRule rule;
+    rule.SetID("CppTest-Exp");
+    rule.SetStatus(Aws::S3::Model::ExpirationStatus::Enabled);
+    Aws::S3::Model::LifecycleRuleFilter filter;
+    filter.SetPrefix("cpp-test/");
+    rule.SetFilter(filter);
+    Aws::S3::Model::LifecycleExpiration exp;
+    exp.SetDays(365);
+    rule.SetExpiration(exp);
+
+    Aws::S3::Model::BucketLifecycleConfiguration config;
+    config.AddRules(rule);
+
+    Aws::S3::Model::PutBucketLifecycleConfigurationRequest putReq;
+    putReq.SetBucket(bucket);
+    putReq.SetLifecycleConfiguration(config);
+    auto putResult = s3->PutBucketLifecycleConfiguration(putReq);
+    ASSERT_TRUE(putResult.IsSuccess()) << putResult.GetError().GetMessage();
+
+    Aws::S3::Model::GetBucketLifecycleConfigurationRequest getReq;
+    getReq.SetBucket(bucket);
+    auto getResult = s3->GetBucketLifecycleConfiguration(getReq);
+    ASSERT_TRUE(getResult.IsSuccess());
+    ASSERT_FALSE(getResult.GetResult().GetRules().empty());
+
+    Aws::S3::Model::DeleteBucketLifecycleRequest delReq;
+    delReq.SetBucket(bucket);
+    s3->DeleteBucketLifecycle(delReq);
+}
+
+TEST_F(S3ProxyTest, CORSCRUD) {
+    Aws::S3::Model::CORSRule corsRule;
+    corsRule.AddAllowedMethods("GET");
+    corsRule.AddAllowedMethods("PUT");
+    corsRule.AddAllowedOrigins("https://cpp-test.example.com");
+    corsRule.AddAllowedHeaders("Authorization");
+    corsRule.SetMaxAgeSeconds(3600);
+
+    Aws::S3::Model::CORSConfiguration corsConfig;
+    corsConfig.AddCORSRules(corsRule);
+
+    Aws::S3::Model::PutBucketCorsRequest putReq;
+    putReq.SetBucket(bucket);
+    putReq.SetCORSConfiguration(corsConfig);
+    auto putResult = s3->PutBucketCors(putReq);
+    ASSERT_TRUE(putResult.IsSuccess()) << putResult.GetError().GetMessage();
+
+    Aws::S3::Model::GetBucketCorsRequest getReq;
+    getReq.SetBucket(bucket);
+    auto getResult = s3->GetBucketCors(getReq);
+    ASSERT_TRUE(getResult.IsSuccess());
+    ASSERT_FALSE(getResult.GetResult().GetCORSRules().empty());
+
+    Aws::S3::Model::DeleteBucketCorsRequest delReq;
+    delReq.SetBucket(bucket);
+    s3->DeleteBucketCors(delReq);
+}
+
+TEST_F(S3ProxyTest, TaggingCRUD) {
+    auto key = MakeTestKey(prefix, "tagging");
+
+    Aws::S3::Model::PutObjectRequest putObjReq;
+    putObjReq.SetBucket(bucket);
+    putObjReq.SetKey(key);
+    auto body = Aws::MakeShared<Aws::StringStream>("put");
+    *body << "tag test";
+    putObjReq.SetBody(body);
+    ASSERT_TRUE(s3->PutObject(putObjReq).IsSuccess());
+
+    Aws::S3::Model::Tag tag;
+    tag.SetKey("Env");
+    tag.SetValue("CppTest");
+    Aws::S3::Model::Tagging tagging;
+    tagging.AddTagSet(tag);
+
+    Aws::S3::Model::PutObjectTaggingRequest putTagReq;
+    putTagReq.SetBucket(bucket);
+    putTagReq.SetKey(key);
+    putTagReq.SetTagging(tagging);
+    ASSERT_TRUE(s3->PutObjectTagging(putTagReq).IsSuccess());
+
+    Aws::S3::Model::GetObjectTaggingRequest getTagReq;
+    getTagReq.SetBucket(bucket);
+    getTagReq.SetKey(key);
+    auto getTagResult = s3->GetObjectTagging(getTagReq);
+    ASSERT_TRUE(getTagResult.IsSuccess());
+    ASSERT_FALSE(getTagResult.GetResult().GetTagSet().empty());
+
+    Aws::S3::Model::DeleteObjectTaggingRequest delTagReq;
+    delTagReq.SetBucket(bucket);
+    delTagReq.SetKey(key);
+    s3->DeleteObjectTagging(delTagReq);
+
+    DeleteKey(key);
+}
+
+} // namespace

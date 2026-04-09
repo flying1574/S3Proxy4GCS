@@ -1,0 +1,10 @@
+.git
+.env
+*.json
+e2e_tests/
+sdk_tests/
+integration_tests/
+k8s/
+.github/
+*.md
+LICENSE

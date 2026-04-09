@@ -1,0 +1,442 @@
+name: Multi-SDK Compatibility Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  GKE_CLUSTER: s3proxy-e2e
+  GKE_REGION: us-east1
+  GAR_REGISTRY: us-east1-docker.pkg.dev/cbs-poctest/s3proxy
+  IMAGE_NAME: s3proxy
+  K8S_NAMESPACE: s3proxy-e2e
+
+jobs:
+  # ================================================================
+  # Job 1: Build image, push to Artifact Registry, deploy to GKE
+  # ================================================================
+  build-and-deploy:
+    name: Build & Deploy to GKE
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      proxy_endpoint: ${{ steps.endpoint.outputs.url }}
+      image_tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-east1-docker.pkg.dev --quiet
+
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE="${{ env.GAR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Get GKE Credentials
+        run: |
+          gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
+            --region ${{ env.GKE_REGION }} --project cbs-poctest
+
+      - name: Deploy to GKE
+        run: |
+          IMAGE="${{ env.GAR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}"
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl set image deployment/s3proxy s3proxy="$IMAGE" -n ${{ env.K8S_NAMESPACE }}
+          kubectl rollout status deployment/s3proxy -n ${{ env.K8S_NAMESPACE }} --timeout=120s
+
+      - name: Wait for Proxy Health
+        id: endpoint
+        run: |
+          # Use kubectl port-forward in background
+          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
+          sleep 5
+
+          # Health check
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Proxy is healthy!"
+              echo "url=http://localhost:8080" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Waiting for proxy... ($i/30)"
+            sleep 2
+          done
+          echo "Proxy did not become healthy"
+          exit 1
+
+  # ================================================================
+  # Job 2: Go V2 SDK Tests (v1.75.1)
+  # ================================================================
+  test-go-v2:
+    name: "Go V2 (v1.75.1)"
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: sdk_tests/go-v2/go.sum
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Get GKE Credentials & Port Forward
+        run: |
+          gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
+            --region ${{ env.GKE_REGION }} --project cbs-poctest
+          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
+          sleep 5
+
+      - name: Run Tests
+        working-directory: sdk_tests/go-v2
+        env:
+          PROXY_ENDPOINT: http://localhost:8080
+          GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
+          GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
+          TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
+          TEST_PREFIX: "sdk-gov2-${{ github.run_id }}/"
+        run: go test -v -count=1 -timeout 5m ./... 2>&1 | tee test-output.txt
+
+      - name: Upload Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-v2-results
+          path: sdk_tests/go-v2/test-output.txt
+
+  # ================================================================
+  # Job 3: Go V1 SDK Tests (v1.50.0)
+  # ================================================================
+  test-go-v1:
+    name: "Go V1 (v1.50.0)"
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: sdk_tests/go-v1/go.sum
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Get GKE Credentials & Port Forward
+        run: |
+          gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
+            --region ${{ env.GKE_REGION }} --project cbs-poctest
+          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
+          sleep 5
+
+      - name: Run Tests
+        working-directory: sdk_tests/go-v1
+        env:
+          PROXY_ENDPOINT: http://localhost:8080
+          GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
+          GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
+          TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
+          TEST_PREFIX: "sdk-gov1-${{ github.run_id }}/"
+        run: go test -v -count=1 -timeout 5m ./... 2>&1 | tee test-output.txt
+
+      - name: Upload Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-v1-results
+          path: sdk_tests/go-v1/test-output.txt
+
+  # ================================================================
+  # Job 4: Python SDK Tests (boto3 1.42.71)
+  # ================================================================
+  test-python:
+    name: "Python (boto3 1.42.71)"
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Get GKE Credentials & Port Forward
+        run: |
+          gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
+            --region ${{ env.GKE_REGION }} --project cbs-poctest
+          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
+          sleep 5
+
+      - name: Install Dependencies
+        run: pip install -r sdk_tests/python/requirements.txt
+
+      - name: Run Tests
+        env:
+          PROXY_ENDPOINT: http://localhost:8080
+          GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
+          GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
+          TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
+          TEST_PREFIX: "sdk-py-${{ github.run_id }}/"
+        run: |
+          cd sdk_tests/python
+          pytest -v --tb=short --junitxml=test-results.xml 2>&1 | tee test-output.txt
+
+      - name: Upload Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-results
+          path: |
+            sdk_tests/python/test-results.xml
+            sdk_tests/python/test-output.txt
+
+  # ================================================================
+  # Job 5: Java V1 SDK Tests (1.12.500)
+  # ================================================================
+  test-java-v1:
+    name: "Java V1 (1.12.500)"
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+          cache: maven
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Get GKE Credentials & Port Forward
+        run: |
+          gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
+            --region ${{ env.GKE_REGION }} --project cbs-poctest
+          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
+          sleep 5
+
+      - name: Run Tests
+        working-directory: sdk_tests/java-v1
+        env:
+          PROXY_ENDPOINT: http://localhost:8080
+          GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
+          GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
+          TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
+          TEST_PREFIX: "sdk-javav1-${{ github.run_id }}/"
+        run: mvn test -B 2>&1 | tee test-output.txt
+
+      - name: Upload Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-v1-results
+          path: |
+            sdk_tests/java-v1/target/surefire-reports/
+            sdk_tests/java-v1/test-output.txt
+
+  # ================================================================
+  # Job 6: Java V2 SDK Tests (2.20.0)
+  # ================================================================
+  test-java-v2:
+    name: "Java V2 (2.20.0)"
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+          cache: maven
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Get GKE Credentials & Port Forward
+        run: |
+          gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
+            --region ${{ env.GKE_REGION }} --project cbs-poctest
+          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
+          sleep 5
+
+      - name: Run Tests
+        working-directory: sdk_tests/java-v2
+        env:
+          PROXY_ENDPOINT: http://localhost:8080
+          GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
+          GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
+          TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
+          TEST_PREFIX: "sdk-javav2-${{ github.run_id }}/"
+        run: mvn test -B 2>&1 | tee test-output.txt
+
+      - name: Upload Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-v2-results
+          path: |
+            sdk_tests/java-v2/target/surefire-reports/
+            sdk_tests/java-v2/test-output.txt
+
+  # ================================================================
+  # Job 7: C++ SDK Tests (1.11.765)
+  # ================================================================
+  test-cpp:
+    name: "C++ (1.11.765)"
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libcurl4-openssl-dev libssl-dev uuid-dev zlib1g-dev
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Get GKE Credentials & Port Forward
+        run: |
+          gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
+            --region ${{ env.GKE_REGION }} --project cbs-poctest
+          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
+          sleep 5
+
+      - name: Build Tests
+        working-directory: sdk_tests/cpp
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j$(nproc)
+
+      - name: Run Tests
+        working-directory: sdk_tests/cpp
+        env:
+          PROXY_ENDPOINT: http://localhost:8080
+          GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
+          GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
+          TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
+          TEST_PREFIX: "sdk-cpp-${{ github.run_id }}/"
+        run: |
+          cd build
+          ctest --output-on-failure -V 2>&1 | tee ../test-output.txt
+
+      - name: Upload Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-results
+          path: sdk_tests/cpp/test-output.txt
+
+  # ================================================================
+  # Job 8: Summary Report
+  # ================================================================
+  report:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [test-go-v2, test-go-v1, test-python, test-java-v1, test-java-v2, test-cpp]
+    if: always()
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: results
+
+      - name: Generate Summary
+        run: |
+          echo "# Multi-SDK Compatibility Test Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| SDK | Version | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|---------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          check_result() {
+            local name="$1" version="$2" dir="$3"
+            if [ -d "results/$dir" ]; then
+              if grep -qiE "FAIL|ERROR|FAILED" "results/$dir/test-output.txt" 2>/dev/null; then
+                echo "| $name | $version | :x: FAIL |" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "| $name | $version | :white_check_mark: PASS |" >> $GITHUB_STEP_SUMMARY
+              fi
+            else
+              echo "| $name | $version | :warning: SKIP |" >> $GITHUB_STEP_SUMMARY
+            fi
+          }
+
+          check_result "Go V2" "v1.75.1" "go-v2-results"
+          check_result "Go V1" "v1.50.0" "go-v1-results"
+          check_result "Python" "boto3 1.42.71" "python-results"
+          check_result "Java V1" "1.12.500" "java-v1-results"
+          check_result "Java V2" "2.20.0" "java-v2-results"
+          check_result "C++" "1.11.765" "cpp-results"
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Triggered by: \`${{ github.event_name }}\` on \`${{ github.ref }}\`" >> $GITHUB_STEP_SUMMARY
