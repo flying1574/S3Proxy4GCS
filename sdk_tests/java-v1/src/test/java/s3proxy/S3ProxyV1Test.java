@@ -29,6 +29,9 @@ public class S3ProxyV1Test {
 
     @BeforeAll
     static void setup() {
+        // GCS returns non-MD5 ETags; disable SDK's client-side MD5 integrity check
+        System.setProperty("com.amazonaws.services.s3.disablePutObjectMD5Validation", "true");
+
         String endpoint = System.getenv("PROXY_ENDPOINT");
         String access = System.getenv("GCS_HMAC_ACCESS");
         String secret = System.getenv("GCS_HMAC_SECRET");

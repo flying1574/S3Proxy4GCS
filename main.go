@@ -206,8 +206,14 @@ func main() {
 
 				signer := v4.NewSigner()
 
-				// Strip User-Agent before re-signing to match aws4gcs known-good pattern
+				// Strip headers that interfere with GCS HMAC signature verification.
+				// User-Agent: not needed, clean canonical request.
+				// Content-MD5: Go V1 SDK computes and sends it; if included in
+				//   signed headers, GCS HMAC may not expect it, causing SignatureDoesNotMatch.
+				// Expect: 100-continue can cause Transport/signing mismatches.
 				req.Header.Del("User-Agent")
+				req.Header.Del("Content-Md5")
+				req.Header.Del("Expect")
 
 				if err := signer.SignHTTP(req.Context(), awsCreds, req, payloadHash, "s3", "us-east-1", time.Now()); err != nil {
 					slog.Error("Failed to re-sign request", "error", err)
@@ -681,7 +687,7 @@ func handlePutCORS(w http.ResponseWriter, r *http.Request) {
 	// 4. In DryRun mode, just print/return success
 	if config.Config.DryRun {
 		w.WriteHeader(http.StatusOK)
-		
+
 		return
 	}
 
@@ -779,7 +785,7 @@ func handlePutLogging(w http.ResponseWriter, r *http.Request) {
 
 	if config.Config.DryRun {
 		w.WriteHeader(http.StatusOK)
-		
+
 		return
 	}
 
@@ -872,7 +878,7 @@ func handlePutWebsite(w http.ResponseWriter, r *http.Request) {
 
 	if config.Config.DryRun {
 		w.WriteHeader(http.StatusOK)
-		
+
 		return
 	}
 
@@ -979,7 +985,7 @@ func handlePutObjectTagging(w http.ResponseWriter, r *http.Request) {
 	if config.Config.DryRun {
 		log.Info("[DRY_RUN] Would apply Tagging to GCS Object", "bucket", targetBucket, "object", targetObject)
 		w.WriteHeader(http.StatusOK)
-		
+
 		return
 	}
 

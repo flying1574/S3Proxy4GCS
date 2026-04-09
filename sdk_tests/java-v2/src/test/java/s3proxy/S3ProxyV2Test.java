@@ -8,6 +8,8 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
 
+import software.amazon.awssdk.services.s3.S3Configuration;
+
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -41,6 +43,9 @@ public class S3ProxyV2Test {
                 .credentialsProvider(StaticCredentialsProvider.create(
                         AwsBasicCredentials.create(access, secret)))
                 .forcePathStyle(true)
+                .serviceConfiguration(S3Configuration.builder()
+                        .checksumValidationEnabled(false)
+                        .build())
                 .build();
     }
 
