@@ -22,6 +22,10 @@ type Settings struct {
 	MaxIdleConnsPerHost   int
 	MaxConcurrentRequests int           // Throttle middleware limit; 0 = no limit
 	GCSCallTimeout        time.Duration // Timeout for individual GCS SDK calls; 0 = no limit
+	IdleConnTimeout       time.Duration // How long idle connections stay in pool
+	ResponseHeaderTimeout time.Duration // Max wait for response headers from GCS
+	ReadBufferSize        int           // TCP read buffer size for read-path Transport
+	WriteBufferSize       int           // TCP write buffer size for write-path Transport
 	ProxyAccessKey        string        // For re-signing
 	ProxySecretKey        string        // For re-signing
 	JSONKey               string        // Path to GCS Service Account JSON key
@@ -80,6 +84,42 @@ func LoadConfig() {
 		}
 	}
 
+	idleConnTimeoutSec := 120
+	if v := getEnv("IDLE_CONN_TIMEOUT_SEC", "120"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil {
+			log.Printf("WARNING: invalid IDLE_CONN_TIMEOUT_SEC value %q, using default 120", v)
+		} else if n > 0 {
+			idleConnTimeoutSec = n
+		}
+	}
+
+	responseHeaderTimeoutSec := 30
+	if v := getEnv("RESPONSE_HEADER_TIMEOUT_SEC", "30"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil {
+			log.Printf("WARNING: invalid RESPONSE_HEADER_TIMEOUT_SEC value %q, using default 30", v)
+		} else if n > 0 {
+			responseHeaderTimeoutSec = n
+		}
+	}
+
+	readBufferSize := 65536 // 64KB
+	if v := getEnv("READ_BUFFER_SIZE", "65536"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil {
+			log.Printf("WARNING: invalid READ_BUFFER_SIZE value %q, using default 65536", v)
+		} else if n > 0 {
+			readBufferSize = n
+		}
+	}
+
+	writeBufferSize := 65536 // 64KB
+	if v := getEnv("WRITE_BUFFER_SIZE", "65536"); v != "" {
+		if n, err := strconv.Atoi(v); err != nil {
+			log.Printf("WARNING: invalid WRITE_BUFFER_SIZE value %q, using default 65536", v)
+		} else if n > 0 {
+			writeBufferSize = n
+		}
+	}
+
 	Config = &Settings{
 		Port:                  getEnv("PORT", "8080"),
 		GCPProjectID:          getEnv("GCP_PROJECT_ID", ""),
@@ -92,6 +132,10 @@ func LoadConfig() {
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		MaxConcurrentRequests: maxConcurrentRequests,
 		GCSCallTimeout:        time.Duration(gcsCallTimeoutSec) * time.Second,
+		IdleConnTimeout:       time.Duration(idleConnTimeoutSec) * time.Second,
+		ResponseHeaderTimeout: time.Duration(responseHeaderTimeoutSec) * time.Second,
+		ReadBufferSize:        readBufferSize,
+		WriteBufferSize:       writeBufferSize,
 		ProxyAccessKey:        getEnv("PROXY_AWS_ACCESS_KEY_ID", getEnv("AWS_ACCESS_KEY_ID", "")),
 		ProxySecretKey:        getEnv("PROXY_AWS_SECRET_ACCESS_KEY", getEnv("AWS_SECRET_ACCESS_KEY", "")),
 		JSONKey:               getEnv("JSON_KEY", ""),

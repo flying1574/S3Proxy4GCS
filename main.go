@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 	"log/slog"
@@ -41,8 +42,12 @@ const maxControlPlaneBodySize = 64 * 1024 // 64 KB
 
 var gcsClient *storage.Client
 var gcsCtx context.Context
-var reverseProxy *httputil.ReverseProxy
+var readProxy *httputil.ReverseProxy  // GET/HEAD: optimized for download (FlushInterval=-1, large ReadBuffer)
+var writeProxy *httputil.ReverseProxy // PUT/POST/DELETE: optimized for upload (large WriteBuffer)
 var gcsURL *url.URL
+
+// Global SigV4 signer — reused across all requests to avoid per-request allocation.
+var signer = v4.NewSigner()
 
 // Prometheus metrics
 var (
@@ -112,26 +117,48 @@ func main() {
 		log.Fatalf("Failed to parse GCS URL: %v", err)
 	}
 
-	reverseProxy = httputil.NewSingleHostReverseProxy(gcsURL)
-	if config.Config.DryRun {
-		reverseProxy.Transport = &dryRunTransport{}
-		slog.Info("Reverse Proxy using DryRun Transport (no real hits)")
-	} else {
-		reverseProxy.Transport = &http.Transport{
+	// Build shared Transport parameters as a helper to reduce duplication.
+	newBaseTransport := func(readBuf, writeBuf int) *http.Transport {
+		return &http.Transport{
 			MaxIdleConns:          config.Config.MaxIdleConns,
 			MaxIdleConnsPerHost:   config.Config.MaxIdleConnsPerHost,
-			IdleConnTimeout:       90 * time.Second,
+			IdleConnTimeout:       config.Config.IdleConnTimeout,
+			ResponseHeaderTimeout: config.Config.ResponseHeaderTimeout,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			DisableCompression:    true, // Preserve Accept-Encoding for S3 signatures
 			ForceAttemptHTTP2:     true, // Enable HTTP/2 for multiplexing
+			ReadBufferSize:        readBuf,
+			WriteBufferSize:       writeBuf,
 		}
-		slog.Info("Reverse Proxy using tuned Transport with timeouts",
-			"MaxIdleConns", config.Config.MaxIdleConns,
-			"MaxIdleConnsPerHost", config.Config.MaxIdleConnsPerHost)
 	}
 
-	reverseProxy.Director = func(req *http.Request) {
+	// Read-path proxy (GET/HEAD): large read buffer, immediate flush for streaming downloads.
+	readProxy = httputil.NewSingleHostReverseProxy(gcsURL)
+	// Write-path proxy (PUT/POST/DELETE): large write buffer for upload throughput.
+	writeProxy = httputil.NewSingleHostReverseProxy(gcsURL)
+
+	if config.Config.DryRun {
+		readProxy.Transport = &dryRunTransport{}
+		writeProxy.Transport = &dryRunTransport{}
+		slog.Info("Reverse Proxies using DryRun Transport (no real hits)")
+	} else {
+		readProxy.Transport = newBaseTransport(config.Config.ReadBufferSize, 0)
+		writeProxy.Transport = newBaseTransport(0, config.Config.WriteBufferSize)
+		slog.Info("Read/Write split Transports initialized",
+			"MaxIdleConns", config.Config.MaxIdleConns,
+			"MaxIdleConnsPerHost", config.Config.MaxIdleConnsPerHost,
+			"IdleConnTimeout", config.Config.IdleConnTimeout,
+			"ResponseHeaderTimeout", config.Config.ResponseHeaderTimeout,
+			"ReadBufferSize", config.Config.ReadBufferSize,
+			"WriteBufferSize", config.Config.WriteBufferSize)
+	}
+
+	// Immediate flush on read proxy — reduces time-to-first-byte for GET/HEAD streaming.
+	readProxy.FlushInterval = -1
+
+	// Shared Director and ModifyResponse applied to both proxies.
+	director := func(req *http.Request) {
 		req.URL.Host = gcsURL.Host
 		req.URL.Scheme = gcsURL.Scheme
 		req.Host = gcsURL.Host // Critical for TLS Handshake
@@ -207,7 +234,6 @@ func main() {
 					SecretAccessKey: config.Config.ProxySecretKey,
 				}
 
-				signer := v4.NewSigner()
 
 				// Strip headers that interfere with GCS HMAC signature verification.
 				req.Header.Del("User-Agent")
@@ -222,17 +248,18 @@ func main() {
 				}
 
 				// For POST ?delete (DeleteObjects), GCS requires Content-MD5.
-				// Compute it from the body and set it; for all other requests, strip it.
+				// Stream-compute MD5 from body using io.TeeReader (single pass).
 				if req.Method == http.MethodPost && req.URL.Query().Has("delete") && req.Body != nil {
-					bodyBytes, readErr := io.ReadAll(req.Body)
+					var buf bytes.Buffer
+					var h hash.Hash = md5.New()
+					_, readErr := io.Copy(&buf, io.TeeReader(req.Body, h))
 					req.Body.Close()
 					if readErr == nil {
-						hash := md5.Sum(bodyBytes)
-						req.Header.Set("Content-Md5", base64.StdEncoding.EncodeToString(hash[:]))
-						req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-						req.ContentLength = int64(len(bodyBytes))
+						req.Header.Set("Content-Md5", base64.StdEncoding.EncodeToString(h.Sum(nil)))
+						req.Body = io.NopCloser(&buf)
+						req.ContentLength = int64(buf.Len())
 						slog.Info("Computed Content-MD5 for POST ?delete",
-							"bodyLen", len(bodyBytes),
+							"bodyLen", buf.Len(),
 							"md5", req.Header.Get("Content-Md5"))
 					}
 				} else {
@@ -265,7 +292,7 @@ func main() {
 		}
 	}
 
-	reverseProxy.ModifyResponse = func(resp *http.Response) error {
+	modifyResponse := func(resp *http.Response) error {
 		if config.Config.DebugLogging {
 			slog.Debug("Response Headers received from GCS", "headers", resp.Header)
 		}
@@ -286,6 +313,12 @@ func main() {
 
 		return nil
 	}
+
+	// Apply shared Director and ModifyResponse to both proxies.
+	readProxy.Director = director
+	readProxy.ModifyResponse = modifyResponse
+	writeProxy.Director = director
+	writeProxy.ModifyResponse = modifyResponse
 
 	r := chi.NewRouter()
 
@@ -576,7 +609,13 @@ func handleS3Request(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Default: Fallthrough to Reverse Proxy
-	reverseProxy.ServeHTTP(w, r)
+	// Route to read or write proxy based on HTTP method.
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		readProxy.ServeHTTP(w, r)
+	default:
+		writeProxy.ServeHTTP(w, r)
+	}
 }
 
 type dryRunTransport struct{}
