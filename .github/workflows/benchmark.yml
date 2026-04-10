@@ -1,0 +1,157 @@
+name: Performance Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: 'Number of concurrent goroutines'
+        required: false
+        default: '20'
+        type: string
+      duration_sec:
+        description: 'Duration per benchmark in seconds'
+        required: false
+        default: '30'
+        type: string
+
+env:
+  GKE_CLUSTER: s3proxy-e2e
+  GKE_REGION: us-east1
+  GAR_REGISTRY: us-east1-docker.pkg.dev/cbs-poctest/s3proxy
+  IMAGE_NAME: s3proxy
+  K8S_NAMESPACE: s3proxy-e2e
+
+jobs:
+  benchmark:
+    name: Build, Deploy & Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Build & Push Image ----
+      - id: meta
+        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-east1-docker.pkg.dev --quiet
+
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE="${{ env.GAR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      # ---- Deploy to GKE ----
+      - name: Get GKE Credentials
+        run: |
+          gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
+            --region ${{ env.GKE_REGION }} --project cbs-poctest
+
+      - name: Deploy to GKE
+        run: |
+          IMAGE="${{ env.GAR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}"
+          kubectl apply -f k8s/namespace.yaml
+          kubectl create secret generic s3proxy-credentials \
+            --from-literal=PROXY_AWS_ACCESS_KEY_ID=${{ secrets.GCS_HMAC_ACCESS }} \
+            --from-literal=PROXY_AWS_SECRET_ACCESS_KEY=${{ secrets.GCS_HMAC_SECRET }} \
+            -n ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic s3proxy-config \
+            --from-literal=TARGET_BUCKET=${{ secrets.TEST_BUCKET }} \
+            -n ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl set image deployment/s3proxy s3proxy="$IMAGE" -n ${{ env.K8S_NAMESPACE }}
+          kubectl rollout status deployment/s3proxy -n ${{ env.K8S_NAMESPACE }} --timeout=120s
+
+      - name: Wait for Proxy Health
+        run: |
+          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
+          sleep 5
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Proxy is healthy!"
+              exit 0
+            fi
+            echo "Waiting for proxy... ($i/30)"
+            sleep 2
+          done
+          echo "Proxy did not become healthy"
+          exit 1
+
+      # ---- Run Benchmark ----
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: e2e_tests/go.sum
+
+      - name: Run Benchmark Suite
+        working-directory: e2e_tests
+        env:
+          PROXY_ENDPOINT: http://localhost:8080
+          GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
+          GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
+          TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
+          TEST_PREFIX: "bench-${{ github.run_id }}/"
+          BENCH_CONCURRENCY: ${{ inputs.concurrency }}
+          BENCH_DURATION_SEC: ${{ inputs.duration_sec }}
+        run: |
+          go test -v -count=1 -timeout 20m -run 'TestBenchmarkSuite' ./... 2>&1 | tee benchmark_output.txt
+
+      # ---- Upload Results ----
+      - name: Upload Benchmark Report (JSON)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: e2e_tests/benchmark_report.json
+          if-no-files-found: warn
+
+      - name: Upload Benchmark Output (Log)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-output
+          path: e2e_tests/benchmark_output.txt
+          if-no-files-found: warn
+
+      # ---- Summary ----
+      - name: Generate Summary
+        if: always()
+        working-directory: e2e_tests
+        run: |
+          echo "# Performance Benchmark Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Concurrency:** ${{ inputs.concurrency }} | **Duration:** ${{ inputs.duration_sec }}s per test" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f benchmark_report.json ]; then
+            echo "## Results" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Test | Size | Ops | ops/s | p50(ms) | p95(ms) | p99(ms) | max(ms) | Errors |" >> $GITHUB_STEP_SUMMARY
+            echo "|------|------|-----|-------|---------|---------|---------|---------|--------|" >> $GITHUB_STEP_SUMMARY
+
+            # Parse JSON report with jq
+            jq -r '.results[] | "| \(.name) | \(.payload_size) | \(.total_ops) | \(.ops_per_sec | . * 10 | round / 10) | \(.p50_ms | . * 10 | round / 10) | \(.p95_ms | . * 10 | round / 10) | \(.p99_ms | . * 10 | round / 10) | \(.max_ms | . * 10 | round / 10) | \(.errors) |"' benchmark_report.json >> $GITHUB_STEP_SUMMARY
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "## System Metrics" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Test | CPU(%) | Mem Δ(MB) | Peak Mem(MB) | Goroutine Δ | HTTP Δ |" >> $GITHUB_STEP_SUMMARY
+            echo "|------|--------|-----------|-------------|------------|--------|" >> $GITHUB_STEP_SUMMARY
+
+            jq -r '.results[] | "| \(.name) | \(.system_metrics.cpu_usage_percent) | \(.system_metrics.memory_delta_mb) | \(.system_metrics.peak_resident_mb | . * 10 | round / 10) | \(.system_metrics.goroutine_delta) | \(.system_metrics.http_requests_delta) |"' benchmark_report.json >> $GITHUB_STEP_SUMMARY
+          else
+            echo "> ⚠️ No benchmark_report.json found. Check logs for errors." >> $GITHUB_STEP_SUMMARY
+          fi
