@@ -403,6 +403,53 @@ export AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED
 
 ---
 
+## Production Deployment (Kubernetes / GKE)
+
+### Resource Configuration (Critical)
+
+The proxy **must** use Guaranteed QoS (`requests == limits`) in Kubernetes. Burstable QoS causes CPU throttling under load due to Linux CFS bandwidth control, resulting in **30~60% throughput degradation**.
+
+```yaml
+# deployment.yaml — S3Proxy Pod
+resources:
+  requests:
+    cpu: "1000m"      # Must equal limits
+    memory: "512Mi"    # Must equal limits
+  limits:
+    cpu: "1000m"
+    memory: "512Mi"
+```
+
+### Pod Anti-Affinity (Recommended)
+
+When running performance-sensitive workloads alongside the proxy (e.g. benchmark jobs, high-throughput clients), use Pod anti-affinity to prevent co-location on the same node:
+
+```yaml
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: benchmark   # or your client app label
+        topologyKey: kubernetes.io/hostname
+```
+
+### GKE Autopilot Notes
+
+- Autopilot aggressively bin-packs Pods. Nodes can reach **200%+ CPU Limits overcommitment**, causing severe throttling for Burstable Pods.
+- Guaranteed QoS Pods receive dedicated CPU shares and are not subject to CFS throttling.
+- Enable **Private Google Access (PGA)** on the VPC subnet so Pods access GCS via Google's internal network (lower latency, no NAT).
+
+### Scaling Recommendations
+
+| Scenario | Recommendation |
+|---|---|
+| GET/PUT 1KB~100KB at >500 ops/s | Single Pod with 1 vCPU is sufficient |
+| GET/PUT 1MB+ or >1000 ops/s | Increase CPU limit to 2 vCPU, or add HPA (target CPU 70%) |
+| Multi-tenant / production | HPA with min=2, max=10 replicas |
+
+---
+
 ## Development & Usage
 
 Initialize dependencies:
