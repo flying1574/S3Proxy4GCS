@@ -35,6 +35,14 @@ spec:
         app: benchmark
     spec:
       serviceAccountName: s3proxy
+      # Ensure benchmark and s3proxy pods land on different nodes
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: s3proxy
+              topologyKey: kubernetes.io/hostname
       restartPolicy: Never
       containers:
         - name: benchmark
@@ -72,9 +80,10 @@ spec:
             - name: BENCH_DURATION_SEC
               value: "30"
           resources:
+            # Guaranteed QoS: requests == limits to avoid CPU throttling
             requests:
-              cpu: "500m"
-              memory: "256Mi"
+              cpu: "2000m"
+              memory: "512Mi"
             limits:
               cpu: "2000m"
               memory: "512Mi"

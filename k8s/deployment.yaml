@@ -24,6 +24,14 @@ spec:
         app: s3proxy
     spec:
       serviceAccountName: s3proxy
+      # Ensure s3proxy and benchmark pods land on different nodes
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: benchmark
+              topologyKey: kubernetes.io/hostname
       containers:
         - name: s3proxy
           # Image tag is updated by CI via: kubectl set image deployment/s3proxy s3proxy=IMAGE
@@ -66,9 +74,10 @@ spec:
                   name: s3proxy-credentials
                   key: PROXY_AWS_SECRET_ACCESS_KEY
           resources:
+            # Guaranteed QoS: requests == limits to avoid CPU throttling
             requests:
-              cpu: "500m"
-              memory: "256Mi"
+              cpu: "1000m"
+              memory: "512Mi"
             limits:
               cpu: "1000m"
               memory: "512Mi"
