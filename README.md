@@ -278,7 +278,7 @@ Required GitHub Secrets: `GCS_HMAC_ACCESS`, `GCS_HMAC_SECRET`, `TEST_BUCKET`.
 
 ## Multi-SDK Deployment Guide
 
-The proxy has been validated against **6 AWS SDKs** (Go V2, Go V1, Python/boto3, Java V1, Java V2, C++) with 9 test cases each (54/54 PASS). Different SDKs require different client-side configurations to work correctly with the GCS HMAC re-signing proxy.
+The proxy has been validated against **6 AWS SDKs** (Go V2, Go V1, Python/boto3, Java V1, Java V2, C++) with 10 test cases each (60/60 PASS). Different SDKs require different client-side configurations to work correctly with the GCS HMAC re-signing proxy.
 
 ### Proxy-Side Header Stripping (Automatic)
 
