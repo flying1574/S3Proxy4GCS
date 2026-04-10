@@ -11,6 +11,9 @@
 #include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
+#include <aws/s3/model/DeleteObjectsRequest.h>
+#include <aws/s3/model/Delete.h>
+#include <aws/s3/model/ObjectIdentifier.h>
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/CreateMultipartUploadRequest.h>
 #include <aws/s3/model/UploadPartRequest.h>
@@ -243,6 +246,58 @@ TEST_F(S3ProxyTest, MultipartUpload) {
               static_cast<long long>(part1.size() + part2.size()));
 
     DeleteKey(key);
+}
+
+TEST_F(S3ProxyTest, DeleteObjects) {
+    auto key1 = MakeTestKey(prefix, "delobj-1");
+    auto key2 = MakeTestKey(prefix, "delobj-2");
+    auto key3 = MakeTestKey(prefix, "delobj-3");
+
+    // Create 3 objects
+    for (const auto& key : {key1, key2, key3}) {
+        Aws::S3::Model::PutObjectRequest putReq;
+        putReq.SetBucket(bucket);
+        putReq.SetKey(key);
+        auto body = Aws::MakeShared<Aws::StringStream>("put");
+        *body << "delete-objects test";
+        putReq.SetBody(body);
+        ASSERT_TRUE(s3->PutObject(putReq).IsSuccess());
+    }
+
+    // DeleteObjects — bulk delete key1 and key2
+    Aws::S3::Model::ObjectIdentifier id1;
+    id1.SetKey(key1);
+    Aws::S3::Model::ObjectIdentifier id2;
+    id2.SetKey(key2);
+
+    Aws::S3::Model::Delete delObj;
+    delObj.AddObjects(id1);
+    delObj.AddObjects(id2);
+    delObj.SetQuiet(false);
+
+    Aws::S3::Model::DeleteObjectsRequest delReq;
+    delReq.SetBucket(bucket);
+    delReq.SetDelete(delObj);
+    auto delResult = s3->DeleteObjects(delReq);
+    ASSERT_TRUE(delResult.IsSuccess()) << delResult.GetError().GetMessage();
+    ASSERT_EQ(delResult.GetResult().GetDeleted().size(), 2u);
+    ASSERT_TRUE(delResult.GetResult().GetErrors().empty());
+
+    // Verify key1 and key2 are gone
+    for (const auto& key : {key1, key2}) {
+        Aws::S3::Model::HeadObjectRequest headReq;
+        headReq.SetBucket(bucket);
+        headReq.SetKey(key);
+        ASSERT_FALSE(s3->HeadObject(headReq).IsSuccess());
+    }
+
+    // Verify key3 still exists
+    Aws::S3::Model::HeadObjectRequest headReq;
+    headReq.SetBucket(bucket);
+    headReq.SetKey(key3);
+    ASSERT_TRUE(s3->HeadObject(headReq).IsSuccess());
+
+    DeleteKey(key3);
 }
 
 TEST_F(S3ProxyTest, StorageClass) {

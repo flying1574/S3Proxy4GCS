@@ -276,6 +276,129 @@ Required GitHub Secrets: `GCS_HMAC_ACCESS`, `GCS_HMAC_SECRET`, `TEST_BUCKET`.
 
 ---
 
+## Multi-SDK Deployment Guide
+
+The proxy has been validated against **6 AWS SDKs** (Go V2, Go V1, Python/boto3, Java V1, Java V2, C++) with 9 test cases each (54/54 PASS). Different SDKs require different client-side configurations to work correctly with the GCS HMAC re-signing proxy.
+
+### Proxy-Side Header Stripping (Automatic)
+
+The proxy Director automatically strips the following headers before SigV4 re-signing. **No user action is required** — this is handled transparently:
+
+| Header | Source SDK | Why Stripped |
+|---|---|---|
+| `User-Agent` | All | AWS-format UA included in signature but not expected by GCS |
+| `Content-Md5` | Go V1, Java V1 | SDK-computed MD5 invalidated after re-signing |
+| `Expect` | Go V1 | `100-continue` interferes with GCS signature verification |
+| `Accept-Encoding` | Go V1 | GCS modifies this in transport, causing canonical request mismatch |
+| `Amz-Sdk-Invocation-Id` | Java V1/V2 | AWS internal tracking ID, not recognized by GCS |
+| `Amz-Sdk-Request` | Java V1/V2 | AWS retry metadata, not recognized by GCS |
+| `X-Amz-Decoded-Content-Length` | Java V1/V2 | aws-chunked related, meaningless after decode |
+| `X-Amz-Trailer` | Java V2 | Flexible Checksums trailer declaration |
+| `Content-Encoding` (aws-chunked) | Java V1/V2 | Conditionally removed when value contains `aws-chunked` |
+
+### Per-SDK Client Configuration
+
+#### Go V2 — No special configuration needed
+
+```go
+client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+    o.UsePathStyle = true
+    o.BaseEndpoint = aws.String("http://PROXY_ENDPOINT")
+})
+```
+
+#### Go V1 — Disable MD5 and 100-Continue
+
+```go
+sess, _ := session.NewSession(&aws.Config{
+    Endpoint:                      aws.String("http://PROXY_ENDPOINT"),
+    Region:                        aws.String("us-east-1"),
+    S3ForcePathStyle:              aws.Bool(true),
+    S3DisableContentMD5Validation: aws.Bool(true), // Required: avoid Content-MD5 re-sign conflict
+    S3Disable100Continue:          aws.Bool(true),  // Required: avoid Expect header interference
+})
+```
+
+#### Python (boto3) — No special configuration needed
+
+```python
+client = boto3.client(
+    "s3",
+    endpoint_url="http://PROXY_ENDPOINT",
+    aws_access_key_id=HMAC_ACCESS,
+    aws_secret_access_key=HMAC_SECRET,
+    region_name="us-east-1",
+    config=Config(s3={"addressing_style": "path"}),
+)
+```
+
+#### Java V1 — Disable MD5 validation and chunked encoding
+
+```java
+// Required: GCS returns non-MD5 ETags
+System.setProperty("com.amazonaws.services.s3.disablePutObjectMD5Validation", "true");
+
+AmazonS3 s3 = AmazonS3ClientBuilder.standard()
+    .withEndpointConfiguration(new EndpointConfiguration("http://PROXY_ENDPOINT", "us-east-1"))
+    .withCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials(access, secret)))
+    .withPathStyleAccessEnabled(true)
+    .withChunkedEncodingDisabled(true)  // Required: disable aws-chunked body framing
+    .build();
+```
+
+#### Java V2 — Disable checksums, chunked encoding, and set env vars
+
+```java
+S3Client s3 = S3Client.builder()
+    .endpointOverride(URI.create("http://PROXY_ENDPOINT"))
+    .region(Region.US_EAST_1)
+    .credentialsProvider(StaticCredentialsProvider.create(
+        AwsBasicCredentials.create(access, secret)))
+    .forcePathStyle(true)
+    .serviceConfiguration(S3Configuration.builder()
+        .checksumValidationEnabled(false)   // Required: disable Flexible Checksums
+        .chunkedEncodingEnabled(false)      // Required: disable aws-chunked framing
+        .build())
+    .build();
+```
+
+**Required environment variables:**
+```bash
+export AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED
+export AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED
+```
+
+#### C++ — Disable payload signing and set env var
+
+```cpp
+Aws::Client::ClientConfiguration config;
+config.endpointOverride = "http://PROXY_ENDPOINT";
+config.region = "us-east-1";
+
+auto s3 = Aws::MakeShared<Aws::S3::S3Client>("s3",
+    creds, config,
+    Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,  // Required
+    /* useVirtualAddressing */ false);
+```
+
+**Required environment variable:**
+```bash
+export AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED
+```
+
+### Quick Reference
+
+| SDK | Special Config | Env Vars | Difficulty |
+|---|---|---|---|
+| **Go V2** | None | None | Zero-config |
+| **Python** | None | None | Zero-config |
+| **Go V1** | `S3DisableContentMD5Validation`, `S3Disable100Continue` | None | Low |
+| **Java V1** | `disablePutObjectMD5Validation`, `ChunkedEncodingDisabled` | None | Low |
+| **Java V2** | `checksumValidationEnabled(false)`, `chunkedEncodingEnabled(false)` | `AWS_REQUEST_CHECKSUM_CALCULATION`, `AWS_RESPONSE_CHECKSUM_VALIDATION` | Medium |
+| **C++** | `PayloadSigningPolicy::Never` | `AWS_REQUEST_CHECKSUM_CALCULATION` | Low |
+
+---
+
 ## Development & Usage
 
 Initialize dependencies:

@@ -85,6 +85,48 @@ class TestListObjects:
                 s3_client.delete_object(Bucket=bucket, Key=key)
 
 
+class TestDeleteObjects:
+    def test_delete_objects(self, s3_client, bucket, env):
+        prefix = env["test_prefix"] + "py-delobj/"
+        key1 = prefix + "obj1-" + str(int(time.time() * 1000))
+        key2 = prefix + "obj2-" + str(int(time.time() * 1000))
+        key3 = prefix + "obj3-" + str(int(time.time() * 1000))
+
+        try:
+            # Create 3 objects
+            for key in (key1, key2, key3):
+                s3_client.put_object(Bucket=bucket, Key=key, Body=b"delete-objects test")
+
+            # DeleteObjects — bulk delete key1 and key2
+            resp = s3_client.delete_objects(
+                Bucket=bucket,
+                Delete={
+                    "Objects": [{"Key": key1}, {"Key": key2}],
+                    "Quiet": False,
+                },
+            )
+            deleted = resp.get("Deleted", [])
+            errors = resp.get("Errors", [])
+            assert len(errors) == 0, f"DeleteObjects errors: {errors}"
+            assert len(deleted) == 2, f"Expected 2 deleted, got {len(deleted)}"
+
+            # Verify key1 and key2 are gone
+            for key in (key1, key2):
+                with pytest.raises(s3_client.exceptions.ClientError):
+                    s3_client.head_object(Bucket=bucket, Key=key)
+
+            # Verify key3 still exists
+            head = s3_client.head_object(Bucket=bucket, Key=key3)
+            assert head["ResponseMetadata"]["HTTPStatusCode"] == 200
+        finally:
+            # Cleanup remaining
+            for key in (key1, key2, key3):
+                try:
+                    s3_client.delete_object(Bucket=bucket, Key=key)
+                except Exception:
+                    pass
+
+
 class TestStorageClass:
     def test_storage_class_translation(self, s3_client, bucket, test_key):
         try:

@@ -157,6 +157,40 @@ public class S3ProxyV1Test {
         }
     }
 
+    @Test
+    @Order(5)
+    void testDeleteObjects() {
+        String key1 = testKey("delobj-1");
+        String key2 = testKey("delobj-2");
+        String key3 = testKey("delobj-3");
+
+        try {
+            // Create 3 objects
+            s3.putObject(bucket, key1, "delete-objects test");
+            s3.putObject(bucket, key2, "delete-objects test");
+            s3.putObject(bucket, key3, "delete-objects test");
+
+            // DeleteObjects — bulk delete key1 and key2
+            DeleteObjectsRequest delReq = new DeleteObjectsRequest(bucket)
+                    .withKeys(key1, key2)
+                    .withQuiet(false);
+            DeleteObjectsResult result = s3.deleteObjects(delReq);
+            assertEquals(2, result.getDeletedObjects().size());
+
+            // Verify key1 and key2 are gone
+            assertThrows(AmazonS3Exception.class, () -> s3.getObjectMetadata(bucket, key1));
+            assertThrows(AmazonS3Exception.class, () -> s3.getObjectMetadata(bucket, key2));
+
+            // Verify key3 still exists
+            ObjectMetadata meta = s3.getObjectMetadata(bucket, key3);
+            assertTrue(meta.getContentLength() > 0);
+        } finally {
+            try { s3.deleteObject(bucket, key1); } catch (Exception ignored) {}
+            try { s3.deleteObject(bucket, key2); } catch (Exception ignored) {}
+            try { s3.deleteObject(bucket, key3); } catch (Exception ignored) {}
+        }
+    }
+
     // ---- Control Plane ----
 
     @Test

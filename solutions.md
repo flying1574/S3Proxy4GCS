@@ -71,9 +71,9 @@ These features intercept high-frequency data path operations or require heavy ba
 **Proxy Impact**: Extreme Latency / Infeasible on Data Path for tag-based ABAC.
 **Recommendation**: Shift to prefix-based security rather than object-level tags.
 
-#### 3. DeleteObjects (Multi-Object Delete) - **[Deferred]**
-**Issue**: GCS S3-compatible API does not support bulk `DeleteObjects`.
-**Proxy Impact**: Resource Exhaustion (Fan-out). Requires concurrent GCS delete calls in proxy.
+#### 3. DeleteObjects (Multi-Object Delete) - **[Implemented ✅]**
+**Issue**: Previously believed GCS S3-compatible API did not support bulk `DeleteObjects`.
+**Resolution**: GCS XML API natively supports `POST /?delete` for bulk deletion of up to 1000 objects per request. The proxy transparently passes through the request with SigV4 re-signing. No fan-out or special handling required.
 
 #### 5. Inventory Data Manifests - **[Deferred]**
 **Issue**: Automations expect specific S3 Inventory output formats.
@@ -88,24 +88,44 @@ These features intercept high-frequency data path operations or require heavy ba
 
 ## SDK Compatibility & Client-Side Workarounds
 
-Recent testing across multiple AWS SDKs (Python, Java V1/V2, C++, Go V1/V2) against GCS surfaced several compatibility nuances that can be addressed directly via client configuration, reducing the translation burden on the proxy.
+The proxy has been validated against **6 AWS SDKs** with full data-plane and control-plane test coverage (54/54 PASS). Below documents both the known issues and the required client-side configurations for each SDK.
 
-### 1. Checksums and PutObject (Signature Mismatch)
-**Issue**: Modern SDKs (Python, Java V2, Go V2) default to "Flexible Checksums" (trailers) using algorithms like CRC32/CRC32C. This wraps payloads in `aws-chunked` format, which GCS does not support, resulting in `SignatureDoesNotMatch` errors.
-**Solution**: 
-- Set the `AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED` environment variable to bypass unexpected checksum framing.
-- **Alternative (High Integrity)**: Configure the client to skip automatic checksums and manually compute `ContentMD5`.
-*(Note: Java V1 and C++ natively use standard `Content-MD5` and work seamlessly).*
+### Known Issues & Solutions
 
-### 2. Java V2 CopyObject (`411 Length Required`)
+#### 1. Flexible Checksums / aws-chunked (Signature Mismatch)
+**Issue**: Modern SDKs (Python, Java V2, Go V2, C++) default to "Flexible Checksums" using `aws-chunked` body framing with trailer checksums. GCS does not support this format, resulting in `SignatureDoesNotMatch` or corrupted stored data.
+**Solution**: A combination of client-side and proxy-side fixes:
+- **Client**: Set env var `AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED` (Java V2, C++)
+- **Client**: Disable chunked encoding in SDK config (Java V1: `withChunkedEncodingDisabled(true)`, Java V2: `chunkedEncodingEnabled(false)`)
+- **Proxy**: Automatically strips `Content-Encoding: aws-chunked`, `X-Amz-Decoded-Content-Length`, `X-Amz-Trailer` headers before re-signing
+
+#### 2. Content-MD5 Header Conflict
+**Issue**: Go V1 and Java V1 SDKs compute `Content-MD5` and include it in the signed request. After proxy re-signing, this header causes GCS signature verification to fail.
+**Solution**:
+- **Client**: Go V1 — set `S3DisableContentMD5Validation: aws.Bool(true)`
+- **Client**: Java V1 — set system property `com.amazonaws.services.s3.disablePutObjectMD5Validation=true`
+- **Proxy**: Automatically strips `Content-Md5` header before re-signing
+
+#### 3. Accept-Encoding Header (Go V1 403 Root Cause)
+**Issue**: Go V1 SDK sends `Accept-Encoding` header which gets included in `SignedHeaders`. GCS modifies or strips this header during HTTP transport, causing the canonical request to not match the signed request, resulting in `403 SignatureDoesNotMatch`.
+**Solution**:
+- **Proxy**: Automatically strips `Accept-Encoding` header before re-signing
+
+#### 4. Expect: 100-Continue (Go V1)
+**Issue**: Go V1 SDK sends `Expect: 100-continue` header that interferes with GCS HMAC signature verification.
+**Solution**:
+- **Client**: Set `S3Disable100Continue: aws.Bool(true)`
+- **Proxy**: Automatically strips `Expect` header before re-signing
+
+#### 5. Java V2 CopyObject (`411 Length Required`)
 **Issue**: The default `UrlConnectionHttpClient` in the Java V2 SDK incorrectly omits the `Content-Length: 0` header on empty `PUT` requests, causing GCS to reject `CopyObject`.
 **Solution**: Explicitly bind the alternative `ApacheHttpClient` in the Java V2 client configuration, which correctly transmits the `Content-Length` header.
 
-### 3. RestoreObject
+#### 6. RestoreObject
 **Issue**: Throws `InvalidArgument` against GCS.
 **Solution**: GCS objects in archive classes are considered "live" and do not require restoration. Client applications should remove calls to `RestoreObject`, or the proxy can be configured to intercept and return a synthetic `200 OK`.
 
-### 4. Storage Classes
+#### 7. Storage Classes
 **Issue**: GCS rejects AWS-specific storage class values (e.g., `STANDARD_IA`, `GLACIER`).
 **Solution (Validated)**: The proxy transparently translates AWS storage classes to GCS equivalents before forwarding:
 - `STANDARD_IA` / `ONEZONE_IA` -> `NEARLINE`
@@ -113,9 +133,8 @@ Recent testing across multiple AWS SDKs (Python, Java V1/V2, C++, Go V1/V2) agai
 - `GLACIER` / `DEEP_ARCHIVE` -> `ARCHIVE`
 - `INTELLIGENT_TIERING` -> `AUTOCLASS`
 - Standard falls back to `STANDARD`.
-*(Note: Client can still pass GCS-native strings directly if preferred, but standard AWS SDK values are now supported).*
 
-### 5. Versioning (ListObjectVersions / HeadObject)
+#### 8. Versioning (ListObjectVersions / HeadObject)
 **Issue**: GCS uses `<Generation>` instead of `<VersionId>`.
 **Proxy Solution (Validated)**: 
 - Intercept `ListObjectVersions` and inject the header `x-amz-interop-list-objects-format: enabled` to force S3-compatible XML.
@@ -123,7 +142,74 @@ Recent testing across multiple AWS SDKs (Python, Java V1/V2, C++, Go V1/V2) agai
 
 ---
 
-### 6. Explicit Client Transport Routing Strategy
+### Proxy-Side Header Stripping (Automatic)
+
+The proxy Director strips the following headers before SigV4 re-signing to ensure GCS HMAC verification passes. This is fully transparent to client applications:
+
+| Header | Triggered By | Reason |
+|---|---|---|
+| `User-Agent` | All SDKs | AWS-format User-Agent interferes with GCS canonical request |
+| `Content-Md5` | Go V1, Java V1 | SDK-computed MD5 invalidated after re-signing |
+| `Expect` | Go V1 | `100-continue` causes GCS signature mismatch |
+| `Accept-Encoding` | Go V1 | GCS modifies value in transport → canonical request mismatch |
+| `Amz-Sdk-Invocation-Id` | Java V1/V2 | AWS internal tracking, GCS rejects unknown signed headers |
+| `Amz-Sdk-Request` | Java V1/V2 | AWS retry metadata, not recognized by GCS |
+| `X-Amz-Decoded-Content-Length` | Java V1/V2 | aws-chunked artifact, meaningless after unwrap |
+| `X-Amz-Trailer` | Java V2 | Flexible Checksums trailer declaration |
+| `Content-Encoding` | Java V1/V2 | Conditionally stripped when value contains `aws-chunked` |
+
+---
+
+### Per-SDK Required Configuration
+
+#### Go V2 (aws-sdk-go-v2 v1.35+) — Zero Configuration
+```go
+o.UsePathStyle = true
+o.BaseEndpoint = aws.String(proxyEndpoint)
+```
+No special flags or env vars needed.
+
+#### Go V1 (aws-sdk-go v1.50+) — 2 Required Flags
+```go
+S3ForcePathStyle:              aws.Bool(true),
+S3DisableContentMD5Validation: aws.Bool(true),  // Avoid Content-MD5 re-sign conflict
+S3Disable100Continue:          aws.Bool(true),   // Avoid Expect header interference
+```
+
+#### Python / boto3 (1.42+) — Zero Configuration
+```python
+config=Config(s3={"addressing_style": "path"})
+```
+No special flags or env vars needed.
+
+#### Java V1 (1.12+) — 2 Required Settings
+```java
+System.setProperty("com.amazonaws.services.s3.disablePutObjectMD5Validation", "true");
+// Builder:
+.withPathStyleAccessEnabled(true)
+.withChunkedEncodingDisabled(true)
+```
+
+#### Java V2 (2.20+) — 2 Code Settings + 2 Env Vars
+```java
+.forcePathStyle(true)
+.serviceConfiguration(S3Configuration.builder()
+    .checksumValidationEnabled(false)
+    .chunkedEncodingEnabled(false)
+    .build())
+```
+**Required env vars:** `AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED`, `AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED`
+
+#### C++ (1.11+) — 1 Code Setting + 1 Env Var
+```cpp
+Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never
+/* useVirtualAddressing */ false
+```
+**Required env var:** `AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED`
+
+---
+
+### Explicit Client Transport Routing Strategy
 
 **Issue**: Customers prefer scoped routing over global environment variables, or want to avoid setting system-wide `HTTP_PROXY` which might affect other services.
 **Solution**: Use a custom `http.Transport` with `DialContext` when initializing the S3 SDK client.
@@ -187,7 +273,7 @@ All standard S3 object operations streamed through `httputil.ReverseProxy` with 
 | **Versioning Interop** | ✅ Implemented | x-goog-generation ↔ x-amz-version-id bi-directional mapping |
 | **SigV4 Re-signing** | ✅ Implemented | Automatic re-sign on header/query modification |
 | **x-id Stripping** | ✅ Implemented | Remove AWS SDK v2 tracking query parameter |
-| **DeleteObjects (Bulk)** | ⏸ Deferred | Fan-out resource exhaustion risk |
+| **DeleteObjects (Bulk)** | ✅ Implemented | GCS XML API natively supports POST /?delete (up to 1000 objects), transparent pass-through |
 | **Flexible Checksums** | ⏸ Deferred | Client-side `WHEN_REQUIRED` workaround available |
 | **Inventory Manifests** | ⏸ Deferred | Requires external stateful ETL worker |
 
@@ -211,16 +297,17 @@ Health probes, metrics, logging infrastructure, and operational safeguards.
 | **Unit Tests** | ✅ Implemented | 17 tests across all `pkg/translate` modules |
 | **Integration Tests** | ✅ Implemented | Isolated Go module, auto-spawns local proxy in DryRun |
 | **E2E Acceptance Tests** | ✅ Implemented | Functional + Stability + Benchmark suites against live proxy |
-| **CI/CD (GitHub Actions)** | ✅ Implemented | Manual-trigger workflow with 3 parallel jobs |
+| **Multi-SDK Tests** | ✅ Validated | 6 SDKs × 9 tests = 54/54 PASS (Go V2, Go V1, Python, Java V1, Java V2, C++) |
+| **CI/CD (GitHub Actions)** | ✅ Implemented | E2E workflow (3 parallel jobs) + Multi-SDK workflow (6 SDK jobs) |
 
 ---
 
 ## Open Questions & Next Steps
 
-1. **Target SDKs Compatibility**: The target SDKs are **Go, Java, Python, and C++**. We must ensure the proxy's XML formatting strictly adheres to what these specific SDKs expect (e.g., namespace prefixes, exact header values).
+1. ~~**Target SDKs Compatibility**: The target SDKs are **Go, Java, Python, and C++**.~~ **✅ Resolved**: All 6 SDKs (Go V2, Go V1, Python, Java V1, Java V2, C++) validated with 54/54 tests passing. See [Per-SDK Required Configuration](#per-sdk-required-configuration) above.
 2. **Consistency Requirements**: For features like Tagging via Metadata, is the eventual consistency of GCS metadata acceptable for the customer's application logic?
 3. **Performance Hardening**: Consider implementing request body size limits (`MaxBytesReader`), server-level timeouts, and concurrency limiting middleware.
-4. **E2E Validation**: Run the E2E acceptance test suite against a live GKE deployment to validate all translations end-to-end.
+4. ~~**E2E Validation**: Run the E2E acceptance test suite against a live GKE deployment to validate all translations end-to-end.~~ **✅ Resolved**: E2E tests and Multi-SDK CI pipeline validated on GKE.
 
 ---
 

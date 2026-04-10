@@ -151,6 +151,51 @@ public class S3ProxyV2Test {
         }
     }
 
+    @Test
+    @Order(5)
+    void testDeleteObjects() {
+        String key1 = testKey("delobj-1");
+        String key2 = testKey("delobj-2");
+        String key3 = testKey("delobj-3");
+
+        try {
+            // Create 3 objects
+            for (String key : new String[]{key1, key2, key3}) {
+                s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key).build(),
+                        RequestBody.fromString("delete-objects test"));
+            }
+
+            // DeleteObjects — bulk delete key1 and key2
+            var delResp = s3.deleteObjects(DeleteObjectsRequest.builder()
+                    .bucket(bucket)
+                    .delete(Delete.builder()
+                            .objects(
+                                    ObjectIdentifier.builder().key(key1).build(),
+                                    ObjectIdentifier.builder().key(key2).build())
+                            .quiet(false)
+                            .build())
+                    .build());
+            assertEquals(2, delResp.deleted().size());
+            assertTrue(delResp.errors().isEmpty());
+
+            // Verify key1 and key2 are gone
+            for (String key : new String[]{key1, key2}) {
+                final String k = key;
+                assertThrows(NoSuchKeyException.class, () ->
+                        s3.headObject(HeadObjectRequest.builder().bucket(bucket).key(k).build()));
+            }
+
+            // Verify key3 still exists
+            var head = s3.headObject(HeadObjectRequest.builder().bucket(bucket).key(key3).build());
+            assertTrue(head.contentLength() > 0);
+        } finally {
+            for (String key : new String[]{key1, key2, key3}) {
+                try { s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build()); }
+                catch (Exception ignored) {}
+            }
+        }
+    }
+
     // ---- Control Plane ----
 
     @Test

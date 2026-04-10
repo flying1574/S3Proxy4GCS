@@ -13,6 +13,7 @@ These features pass through the proxy transparently to GCS. The proxy preserves 
 -   **`GetObject`**
 -   **`HeadObject`**
 -   **`DeleteObject`**
+-   **`DeleteObjects`** (Multi-Object Delete, up to 1000 objects per request)
 -   **`ListObjectsV2`**
 
 ### 2. Multipart Uploads
@@ -63,7 +64,7 @@ These features are intercepted by the proxy to translate between AWS XML and GCS
 These features are known failures or formally deferred due to performance or architectural limitations.
 
 ### 10. Multi-Object Delete
--   **`DeleteObjects`** (Fan-out not supported natively in GCS S3 API, deferred).
+-   **`DeleteObjects`** — GCS XML API natively supports `POST /?delete` bulk delete (up to 1000 objects). Passes through the proxy transparently with SigV4 re-signing. **[Implemented ✅]**
 
 ### 11. Flexible Checksums (aws-chunked)
 -   **`aws-chunked` trailers for checksums** (Deferred to client workarounds: `AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED`).

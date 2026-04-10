@@ -23,3 +23,4 @@ e2e_tests/benchmark_report.json
 # OS Specific
 .DS_Store
 *.pdf
+test_report_final.html

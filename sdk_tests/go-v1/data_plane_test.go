@@ -122,6 +122,66 @@ func TestMultipartUpload(t *testing.T) {
 	}
 }
 
+func TestDeleteObjects(t *testing.T) {
+	client := NewS3Client(t, testEnv)
+	bucket := testEnv.TestBucket
+	key1 := GenerateTestKey(testEnv, "gov1-delobj-1")
+	key2 := GenerateTestKey(testEnv, "gov1-delobj-2")
+	key3 := GenerateTestKey(testEnv, "gov1-delobj-3")
+
+	t.Cleanup(func() { Cleanup(t, client, bucket, key1, key2, key3) })
+
+	// Create 3 objects
+	for _, key := range []string{key1, key2, key3} {
+		_, err := client.PutObject(&s3.PutObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String(key),
+			Body: strings.NewReader("delete-objects test"),
+		})
+		if err != nil {
+			t.Fatalf("PutObject(%s) failed: %v", key, err)
+		}
+	}
+
+	// DeleteObjects — bulk delete key1 and key2
+	delOut, err := client.DeleteObjects(&s3.DeleteObjectsInput{
+		Bucket: aws.String(bucket),
+		Delete: &s3.Delete{
+			Objects: []*s3.ObjectIdentifier{
+				{Key: aws.String(key1)},
+				{Key: aws.String(key2)},
+			},
+			Quiet: aws.Bool(false),
+		},
+	})
+	if err != nil {
+		t.Fatalf("DeleteObjects failed: %v", err)
+	}
+	if len(delOut.Errors) > 0 {
+		t.Fatalf("DeleteObjects returned errors: %v", delOut.Errors)
+	}
+	if len(delOut.Deleted) != 2 {
+		t.Fatalf("Expected 2 deleted, got %d", len(delOut.Deleted))
+	}
+
+	// Verify key1 and key2 are gone
+	for _, key := range []string{key1, key2} {
+		_, err := client.HeadObject(&s3.HeadObjectInput{
+			Bucket: aws.String(bucket), Key: aws.String(key),
+		})
+		if err == nil {
+			t.Fatalf("HeadObject(%s) should have failed after DeleteObjects", key)
+		}
+	}
+
+	// Verify key3 still exists
+	_, err = client.HeadObject(&s3.HeadObjectInput{
+		Bucket: aws.String(bucket), Key: aws.String(key3),
+	})
+	if err != nil {
+		t.Fatalf("HeadObject(%s) should still exist: %v", key3, err)
+	}
+}
+
 func TestStorageClass(t *testing.T) {
 	client := NewS3Client(t, testEnv)
 	bucket := testEnv.TestBucket
