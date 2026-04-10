@@ -297,7 +297,7 @@ Health probes, metrics, logging infrastructure, and operational safeguards.
 | **Unit Tests** | ✅ Implemented | 17 tests across all `pkg/translate` modules |
 | **Integration Tests** | ✅ Implemented | Isolated Go module, auto-spawns local proxy in DryRun |
 | **E2E Acceptance Tests** | ✅ Implemented | Functional + Stability + Benchmark suites against live proxy |
-| **Multi-SDK Tests** | ✅ Validated | 6 SDKs × 9 tests = 54/54 PASS (Go V2, Go V1, Python, Java V1, Java V2, C++) |
+| **Multi-SDK Tests** | ✅ Validated | 6 SDKs × 10 tests = 60/60 PASS (Go V2, Go V1, Python, Java V1, Java V2, C++) |
 | **CI/CD (GitHub Actions)** | ✅ Implemented | E2E workflow (3 parallel jobs) + Multi-SDK workflow (6 SDK jobs) |
 
 ---
@@ -306,7 +306,7 @@ Health probes, metrics, logging infrastructure, and operational safeguards.
 
 1. ~~**Target SDKs Compatibility**: The target SDKs are **Go, Java, Python, and C++**.~~ **✅ Resolved**: All 6 SDKs (Go V2, Go V1, Python, Java V1, Java V2, C++) validated with 54/54 tests passing. See [Per-SDK Required Configuration](#per-sdk-required-configuration) above.
 2. **Consistency Requirements**: For features like Tagging via Metadata, is the eventual consistency of GCS metadata acceptable for the customer's application logic?
-3. **Performance Hardening**: Consider implementing request body size limits (`MaxBytesReader`), server-level timeouts, and concurrency limiting middleware.
+3. ~~**Performance Hardening**: Consider implementing request body size limits (`MaxBytesReader`), server-level timeouts, and concurrency limiting middleware.~~ **✅ Resolved**: Implemented read/write split Transport (separate GET/HEAD vs PUT/POST/DELETE proxies with optimized buffer sizes), global SigV4 signer reuse, streaming MD5 for DeleteObjects, parameterized connection pool timeouts (IdleConnTimeout, ResponseHeaderTimeout), and concurrency limiter middleware.
 4. ~~**E2E Validation**: Run the E2E acceptance test suite against a live GKE deployment to validate all translations end-to-end.~~ **✅ Resolved**: E2E tests and Multi-SDK CI pipeline validated on GKE.
 
 ---

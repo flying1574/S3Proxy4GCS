@@ -28,6 +28,10 @@ Available Configuration Options:
 -   `MAX_IDLE_CONNS_PER_HOST` (Default: `1000`): Maximum idle connections per host for the reverse pool.
 -   `MAX_CONCURRENT_REQUESTS` (Default: `1000`): Maximum number of requests processed concurrently. Excess requests receive `503 Service Unavailable`. Set to `0` to disable throttling. **This value should be tuned based on machine resources (CPU cores, memory) and GCS API rate limits through performance benchmarking.**
 -   `GCS_CALL_TIMEOUT_SEC` (Default: `30`): Timeout in seconds for individual GCS SDK API calls (bucket updates, attribute queries). Prevents goroutine leaks when GCS is unresponsive. Set to `0` to disable (not recommended).
+-   `IDLE_CONN_TIMEOUT_SEC` (Default: `120`): How long idle connections remain in the pool before being closed. Higher values improve connection reuse under sustained load.
+-   `RESPONSE_HEADER_TIMEOUT_SEC` (Default: `30`): Maximum time to wait for GCS response headers. Protects against slow backend responses.
+-   `READ_BUFFER_SIZE` (Default: `65536`): TCP read buffer size (bytes) for the GET/HEAD read-path Transport. Larger values improve download throughput for large objects.
+-   `WRITE_BUFFER_SIZE` (Default: `65536`): TCP write buffer size (bytes) for the PUT/POST/DELETE write-path Transport. Larger values improve upload throughput for large objects.
 
 ## Using with standard AWS S3 SDK (Zero Code Change via HTTP_PROXY)
 
@@ -287,7 +291,7 @@ The proxy Director automatically strips the following headers before SigV4 re-si
 | Header | Source SDK | Why Stripped |
 |---|---|---|
 | `User-Agent` | All | AWS-format UA included in signature but not expected by GCS |
-| `Content-Md5` | Go V1, Java V1 | SDK-computed MD5 invalidated after re-signing |
+| `Content-Md5` | Go V1, Java V1 | Stripped by default (SDK-computed MD5 invalidated after re-signing); **exception: `POST ?delete` — proxy recomputes MD5 from body** (GCS requires `Content-MD5` or `x-amz-checksum-*` for bulk delete) |
 | `Expect` | Go V1 | `100-continue` interferes with GCS signature verification |
 | `Accept-Encoding` | Go V1 | GCS modifies this in transport, causing canonical request mismatch |
 | `Amz-Sdk-Invocation-Id` | Java V1/V2 | AWS internal tracking ID, not recognized by GCS |
