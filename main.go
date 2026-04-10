@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -208,15 +210,7 @@ func main() {
 				signer := v4.NewSigner()
 
 				// Strip headers that interfere with GCS HMAC signature verification.
-				// User-Agent: not needed, clean canonical request.
-				// Content-MD5: Go V1 SDK computes and sends it; if included in
-				//   signed headers, GCS HMAC may not expect it, causing SignatureDoesNotMatch.
-				// Expect: 100-continue can cause Transport/signing mismatches.
-				// Amz-Sdk-Invocation-Id / Amz-Sdk-Request: SDK tracking headers.
-				// X-Amz-Decoded-Content-Length / X-Amz-Trailer: aws-chunked related.
-				// Content-Encoding: may contain aws-chunked from older SDKs.
 				req.Header.Del("User-Agent")
-				req.Header.Del("Content-Md5")
 				req.Header.Del("Expect")
 				req.Header.Del("Amz-Sdk-Invocation-Id")
 				req.Header.Del("Amz-Sdk-Request")
@@ -225,6 +219,24 @@ func main() {
 				req.Header.Del("Accept-Encoding")
 				if ce := req.Header.Get("Content-Encoding"); strings.Contains(ce, "aws-chunked") {
 					req.Header.Del("Content-Encoding")
+				}
+
+				// For POST ?delete (DeleteObjects), GCS requires Content-MD5.
+				// Compute it from the body and set it; for all other requests, strip it.
+				if req.Method == http.MethodPost && req.URL.Query().Has("delete") && req.Body != nil {
+					bodyBytes, readErr := io.ReadAll(req.Body)
+					req.Body.Close()
+					if readErr == nil {
+						hash := md5.Sum(bodyBytes)
+						req.Header.Set("Content-Md5", base64.StdEncoding.EncodeToString(hash[:]))
+						req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+						req.ContentLength = int64(len(bodyBytes))
+						slog.Info("Computed Content-MD5 for POST ?delete",
+							"bodyLen", len(bodyBytes),
+							"md5", req.Header.Get("Content-Md5"))
+					}
+				} else {
+					req.Header.Del("Content-Md5")
 				}
 
 				// Debug: log all headers before re-signing (temporary)
