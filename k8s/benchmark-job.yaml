@@ -1,0 +1,80 @@
+# Headless Service: DNS resolves directly to S3Proxy Pod IP
+# No ClusterIP → no kube-proxy/iptables/IPVS involvement
+# Benchmark pod connects to Pod IP via DNS (zero service-proxy overhead)
+apiVersion: v1
+kind: Service
+metadata:
+  name: s3proxy-headless
+  namespace: s3proxy-e2e
+  labels:
+    app: s3proxy
+spec:
+  clusterIP: None          # Headless: DNS returns Pod IP directly
+  selector:
+    app: s3proxy
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# Benchmark Job: runs inside the cluster, connects to Pod IP
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark
+  namespace: s3proxy-e2e
+  labels:
+    app: benchmark
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: benchmark
+    spec:
+      serviceAccountName: s3proxy
+      restartPolicy: Never
+      containers:
+        - name: benchmark
+          # Image tag updated by CI: kubectl set image ...
+          image: us-east1-docker.pkg.dev/cbs-poctest/s3proxy/s3proxy-benchmark:latest
+          args:
+            - "-test.v"
+            - "-test.count=1"
+            - "-test.timeout=20m"
+            - "-test.run=TestBenchmarkSuite"
+          env:
+            # Direct Pod IP via headless service DNS
+            # s3proxy-headless resolves to Pod IP, not ClusterIP
+            - name: PROXY_ENDPOINT
+              value: "http://s3proxy-headless:8080"
+            - name: GCS_HMAC_ACCESS
+              valueFrom:
+                secretKeyRef:
+                  name: s3proxy-credentials
+                  key: PROXY_AWS_ACCESS_KEY_ID
+            - name: GCS_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: s3proxy-credentials
+                  key: PROXY_AWS_SECRET_ACCESS_KEY
+            - name: TEST_BUCKET
+              valueFrom:
+                secretKeyRef:
+                  name: s3proxy-config
+                  key: TARGET_BUCKET
+            - name: TEST_PREFIX
+              value: "bench-incluster/"
+            - name: BENCH_CONCURRENCY
+              value: "20"
+            - name: BENCH_DURATION_SEC
+              value: "30"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "256Mi"
+            limits:
+              cpu: "2000m"
+              memory: "512Mi"

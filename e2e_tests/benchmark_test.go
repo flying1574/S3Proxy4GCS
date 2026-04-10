@@ -422,6 +422,11 @@ func TestBenchmarkSuite(t *testing.T) {
 		t.Logf("Benchmark report written to %s", reportPath)
 	}
 
+	// Also emit JSON to stdout with markers for easy extraction from container logs
+	fmt.Println("BENCHMARK_JSON_START")
+	fmt.Println(string(reportJSON))
+	fmt.Println("BENCHMARK_JSON_END")
+
 	// Print final summary table
 	fmt.Println()
 	fmt.Println("================================================================================")

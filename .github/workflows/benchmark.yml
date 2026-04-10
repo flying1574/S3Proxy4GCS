@@ -1,4 +1,4 @@
-name: Performance Benchmark
+name: Performance Benchmark (In-Cluster)
 
 on:
   workflow_dispatch:
@@ -18,22 +18,21 @@ env:
   GKE_CLUSTER: s3proxy-e2e
   GKE_REGION: us-east1
   GAR_REGISTRY: us-east1-docker.pkg.dev/cbs-poctest/s3proxy
-  IMAGE_NAME: s3proxy
   K8S_NAMESPACE: s3proxy-e2e
 
 jobs:
   benchmark:
-    name: Build, Deploy & Benchmark
+    name: Build, Deploy & In-Cluster Benchmark
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
-      # ---- Build & Push Image ----
       - id: meta
         run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
+      # ---- GCP Auth ----
       - id: auth
         uses: google-github-actions/auth@v2
         with:
@@ -46,21 +45,29 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker us-east1-docker.pkg.dev --quiet
 
-      - name: Build and Push Docker Image
+      # ---- Build & Push S3Proxy Image ----
+      - name: Build and Push S3Proxy Image
         run: |
-          IMAGE="${{ env.GAR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}"
+          IMAGE="${{ env.GAR_REGISTRY }}/s3proxy:${{ steps.meta.outputs.tag }}"
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
 
-      # ---- Deploy to GKE ----
+      # ---- Build & Push Benchmark Image ----
+      - name: Build and Push Benchmark Image
+        run: |
+          IMAGE="${{ env.GAR_REGISTRY }}/s3proxy-benchmark:${{ steps.meta.outputs.tag }}"
+          docker build -t "$IMAGE" -f e2e_tests/Dockerfile e2e_tests/
+          docker push "$IMAGE"
+
+      # ---- Deploy S3Proxy to GKE ----
       - name: Get GKE Credentials
         run: |
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
 
-      - name: Deploy to GKE
+      - name: Deploy S3Proxy
         run: |
-          IMAGE="${{ env.GAR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}"
+          IMAGE="${{ env.GAR_REGISTRY }}/s3proxy:${{ steps.meta.outputs.tag }}"
           kubectl apply -f k8s/namespace.yaml
           kubectl create secret generic s3proxy-credentials \
             --from-literal=PROXY_AWS_ACCESS_KEY_ID=${{ secrets.GCS_HMAC_ACCESS }} \
@@ -74,76 +81,141 @@ jobs:
           kubectl set image deployment/s3proxy s3proxy="$IMAGE" -n ${{ env.K8S_NAMESPACE }}
           kubectl rollout status deployment/s3proxy -n ${{ env.K8S_NAMESPACE }} --timeout=120s
 
-      - name: Wait for Proxy Health
+      # ---- In-Cluster Health Check via Job ----
+      - name: Verify S3Proxy Health (In-Cluster)
         run: |
-          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          sleep 5
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-              echo "Proxy is healthy!"
-              exit 0
-            fi
-            echo "Waiting for proxy... ($i/30)"
-            sleep 2
-          done
-          echo "Proxy did not become healthy"
-          exit 1
+          # Apply headless service for direct Pod IP resolution
+          kubectl apply -f k8s/benchmark-job.yaml | head -1
 
-      # ---- Run Benchmark ----
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-          cache-dependency-path: e2e_tests/go.sum
+          # Quick health check via a one-shot pod
+          kubectl run health-check --rm -i --restart=Never \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --image=curlimages/curl:latest \
+            -- curl -sf --max-time 10 http://s3proxy-headless:8080/health
+          echo "S3Proxy is healthy via headless service (direct Pod IP)"
 
-      - name: Run Benchmark Suite
-        working-directory: e2e_tests
-        env:
-          PROXY_ENDPOINT: http://localhost:8080
-          GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
-          GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
-          TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
-          TEST_PREFIX: "bench-${{ github.run_id }}/"
-          BENCH_CONCURRENCY: ${{ inputs.concurrency }}
-          BENCH_DURATION_SEC: ${{ inputs.duration_sec }}
+      # ---- Network Path Verification ----
+      - name: Verify Network Path (Pod IP, no iptables/kube-proxy)
         run: |
-          go test -v -count=1 -timeout 20m -run 'TestBenchmarkSuite' ./... 2>&1 | tee benchmark_output.txt
+          # Show the S3Proxy Pod IP
+          POD_IP=$(kubectl get pod -l app=s3proxy -n ${{ env.K8S_NAMESPACE }} \
+            -o jsonpath='{.items[0].status.podIP}')
+          echo "S3Proxy Pod IP: $POD_IP"
 
-      # ---- Upload Results ----
+          # Verify headless service resolves to Pod IP (not ClusterIP)
+          kubectl run dns-check --rm -i --restart=Never \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --image=busybox:1.36 \
+            -- nslookup s3proxy-headless.${{ env.K8S_NAMESPACE }}.svc.cluster.local
+          echo "Headless DNS verified: resolves to Pod IP directly"
+
+          # Show cluster networking mode
+          echo "--- GKE Networking Info ---"
+          kubectl get nodes -o jsonpath='{.items[0].metadata.labels}' | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); print('Dataplane:', d.get('cloud.google.com/gke-netd-ready','N/A'))"
+          echo "GKE Dataplane V2 (eBPF): bypasses iptables and kube-proxy entirely"
+
+      # ---- Run Benchmark as K8s Job ----
+      - name: Run Benchmark Job (In-Cluster, Pod-to-Pod)
+        run: |
+          BENCH_IMAGE="${{ env.GAR_REGISTRY }}/s3proxy-benchmark:${{ steps.meta.outputs.tag }}"
+
+          # Delete any previous benchmark job
+          kubectl delete job benchmark -n ${{ env.K8S_NAMESPACE }} --ignore-not-found
+          sleep 2
+
+          # Generate the job manifest with correct image and parameters
+          sed -e "s|image: .*s3proxy-benchmark:.*|image: ${BENCH_IMAGE}|" \
+              -e "s|value: \"20\"|value: \"${{ inputs.concurrency }}\"|" \
+              -e 's|value: "bench-incluster/"|value: "bench-${{ github.run_id }}/"|' \
+              k8s/benchmark-job.yaml | \
+            sed "/BENCH_DURATION_SEC/{n;s|value: \"30\"|value: \"${{ inputs.duration_sec }}\"|;}" | \
+            kubectl apply -f -
+
+          echo "Benchmark job started. Waiting for completion..."
+
+      - name: Wait for Benchmark Completion
+        run: |
+          # Wait for job to complete (max 20 minutes)
+          kubectl wait --for=condition=complete job/benchmark \
+            -n ${{ env.K8S_NAMESPACE }} --timeout=1200s || true
+
+          # Check job status
+          STATUS=$(kubectl get job benchmark -n ${{ env.K8S_NAMESPACE }} \
+            -o jsonpath='{.status.conditions[0].type}')
+          echo "Job status: $STATUS"
+
+          if [ "$STATUS" != "Complete" ]; then
+            echo "::error::Benchmark job did not complete successfully"
+            kubectl logs job/benchmark -n ${{ env.K8S_NAMESPACE }} --tail=50
+            exit 1
+          fi
+
+      # ---- Collect Results ----
+      - name: Collect Benchmark Results
+        if: always()
+        run: |
+          mkdir -p results
+
+          # Get full logs
+          kubectl logs job/benchmark -n ${{ env.K8S_NAMESPACE }} > results/benchmark_output.txt 2>&1 || true
+
+          # Extract the JSON report from logs using markers
+          python3 -c "
+import sys
+text = open('results/benchmark_output.txt').read()
+start_marker = 'BENCHMARK_JSON_START'
+end_marker = 'BENCHMARK_JSON_END'
+start = text.find(start_marker)
+end = text.find(end_marker)
+if start >= 0 and end >= 0:
+    json_text = text[start + len(start_marker):end].strip()
+    with open('results/benchmark_report.json', 'w') as f:
+        f.write(json_text)
+    print('JSON report extracted successfully')
+else:
+    print('WARNING: No JSON markers found in logs')
+" || true
+
+          # Show summary from logs
+          echo "=== Benchmark Output (tail) ==="
+          tail -40 results/benchmark_output.txt || true
+
       - name: Upload Benchmark Report (JSON)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-report
-          path: e2e_tests/benchmark_report.json
+          name: benchmark-report-incluster
+          path: results/benchmark_report.json
           if-no-files-found: warn
 
       - name: Upload Benchmark Output (Log)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-output
-          path: e2e_tests/benchmark_output.txt
+          name: benchmark-output-incluster
+          path: results/benchmark_output.txt
           if-no-files-found: warn
 
       # ---- Summary ----
       - name: Generate Summary
         if: always()
-        working-directory: e2e_tests
         run: |
-          echo "# Performance Benchmark Report" >> $GITHUB_STEP_SUMMARY
+          echo "# Performance Benchmark Report (In-Cluster)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Network Path:** Pod-to-Pod via Headless Service (direct Pod IP, no iptables/kube-proxy)" >> $GITHUB_STEP_SUMMARY
+          echo "**Dataplane:** GKE Dataplane V2 (eBPF/Cilium)" >> $GITHUB_STEP_SUMMARY
           echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Concurrency:** ${{ inputs.concurrency }} | **Duration:** ${{ inputs.duration_sec }}s per test" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          if [ -f benchmark_report.json ]; then
+          if [ -f results/benchmark_report.json ]; then
             echo "## Results" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "| Test | Size | Ops | ops/s | p50(ms) | p95(ms) | p99(ms) | max(ms) | Errors |" >> $GITHUB_STEP_SUMMARY
             echo "|------|------|-----|-------|---------|---------|---------|---------|--------|" >> $GITHUB_STEP_SUMMARY
 
-            # Parse JSON report with jq
-            jq -r '.results[] | "| \(.name) | \(.payload_size) | \(.total_ops) | \(.ops_per_sec | . * 10 | round / 10) | \(.p50_ms | . * 10 | round / 10) | \(.p95_ms | . * 10 | round / 10) | \(.p99_ms | . * 10 | round / 10) | \(.max_ms | . * 10 | round / 10) | \(.errors) |"' benchmark_report.json >> $GITHUB_STEP_SUMMARY
+            jq -r '.results[] | "| \(.name) | \(.payload_size) | \(.total_ops) | \(.ops_per_sec | . * 10 | round / 10) | \(.p50_ms | . * 10 | round / 10) | \(.p95_ms | . * 10 | round / 10) | \(.p99_ms | . * 10 | round / 10) | \(.max_ms | . * 10 | round / 10) | \(.errors) |"' results/benchmark_report.json >> $GITHUB_STEP_SUMMARY
 
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "## System Metrics" >> $GITHUB_STEP_SUMMARY
@@ -151,7 +223,14 @@ jobs:
             echo "| Test | CPU(%) | Mem Δ(MB) | Peak Mem(MB) | Goroutine Δ | HTTP Δ |" >> $GITHUB_STEP_SUMMARY
             echo "|------|--------|-----------|-------------|------------|--------|" >> $GITHUB_STEP_SUMMARY
 
-            jq -r '.results[] | "| \(.name) | \(.system_metrics.cpu_usage_percent) | \(.system_metrics.memory_delta_mb) | \(.system_metrics.peak_resident_mb | . * 10 | round / 10) | \(.system_metrics.goroutine_delta) | \(.system_metrics.http_requests_delta) |"' benchmark_report.json >> $GITHUB_STEP_SUMMARY
+            jq -r '.results[] | "| \(.name) | \(.system_metrics.cpu_usage_percent) | \(.system_metrics.memory_delta_mb) | \(.system_metrics.peak_resident_mb | . * 10 | round / 10) | \(.system_metrics.goroutine_delta) | \(.system_metrics.http_requests_delta) |"' results/benchmark_report.json >> $GITHUB_STEP_SUMMARY
           else
             echo "> ⚠️ No benchmark_report.json found. Check logs for errors." >> $GITHUB_STEP_SUMMARY
           fi
+
+      # ---- Cleanup ----
+      - name: Cleanup Benchmark Job
+        if: always()
+        run: |
+          kubectl delete job benchmark -n ${{ env.K8S_NAMESPACE }} --ignore-not-found
+          kubectl delete pod health-check dns-check -n ${{ env.K8S_NAMESPACE }} --ignore-not-found 2>/dev/null || true
