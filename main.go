@@ -107,6 +107,19 @@ func main() {
 		}
 		defer gcsClient.Close()
 		log.Println("Initialized real GCS client.")
+
+		// Warmup: pre-fetch bucket metadata to eagerly resolve credentials and
+		// establish the first HTTP/2 connection to GCS.  Without this, the very
+		// first control-plane request after pod startup may hit a cold-start
+		// latency spike (token fetch + TLS handshake) that can exceed SDK retry
+		// budgets and surface as 502 errors.
+		warmCtx, warmCancel := context.WithTimeout(gcsCtx, 10*time.Second)
+		if _, wErr := gcsClient.Bucket(config.Config.TargetBucket).Attrs(warmCtx); wErr != nil {
+			slog.Warn("GCS warmup call failed (non-fatal, will retry on first request)", "error", wErr)
+		} else {
+			slog.Info("GCS client warmup succeeded", "bucket", config.Config.TargetBucket)
+		}
+		warmCancel()
 	} else {
 		log.Println("Running in DRY_RUN mode (No real GCS hits).")
 	}
@@ -233,7 +246,6 @@ func main() {
 					AccessKeyID:     config.Config.ProxyAccessKey,
 					SecretAccessKey: config.Config.ProxySecretKey,
 				}
-
 
 				// Strip headers that interfere with GCS HMAC signature verification.
 				req.Header.Del("User-Agent")

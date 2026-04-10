@@ -76,17 +76,17 @@ jobs:
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
           sleep 5
 
-          # Health check
+          # Health check — use /readyz to ensure GCS connectivity is warm
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-              echo "Proxy is healthy!"
+            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+              echo "Proxy is ready (GCS connectivity verified)!"
               echo "url=http://localhost:8080" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             echo "Waiting for proxy... ($i/30)"
             sleep 2
           done
-          echo "Proxy did not become healthy"
+          echo "Proxy did not become ready"
           exit 1
 
   # ================================================================
@@ -120,8 +120,8 @@ jobs:
             --region ${{ env.GKE_REGION }} --project cbs-poctest
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
           for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-              echo "Proxy is healthy!"
+            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+              echo "Proxy is ready!"
               break
             fi
             echo "Waiting for port-forward... ($i/20)"
@@ -136,7 +136,7 @@ jobs:
           GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
           TEST_PREFIX: "sdk-gov2-${{ github.run_id }}/"
-        run: go test -v -count=1 -timeout 5m ./... 2>&1 | tee test-output.txt
+        run: set -o pipefail && go test -v -count=1 -timeout 5m ./... 2>&1 | tee test-output.txt
 
       - name: Upload Results
         if: always()
@@ -177,8 +177,8 @@ jobs:
             --region ${{ env.GKE_REGION }} --project cbs-poctest
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
           for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-              echo "Proxy is healthy!"
+            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+              echo "Proxy is ready!"
               break
             fi
             echo "Waiting for port-forward... ($i/20)"
@@ -193,7 +193,7 @@ jobs:
           GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
           TEST_PREFIX: "sdk-gov1-${{ github.run_id }}/"
-        run: go test -v -count=1 -timeout 5m ./... 2>&1 | tee test-output.txt
+        run: set -o pipefail && go test -v -count=1 -timeout 5m ./... 2>&1 | tee test-output.txt
 
       - name: Upload Results
         if: always()
@@ -233,8 +233,8 @@ jobs:
             --region ${{ env.GKE_REGION }} --project cbs-poctest
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
           for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-              echo "Proxy is healthy!"
+            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+              echo "Proxy is ready!"
               break
             fi
             echo "Waiting for port-forward... ($i/20)"
@@ -252,6 +252,7 @@ jobs:
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
           TEST_PREFIX: "sdk-py-${{ github.run_id }}/"
         run: |
+          set -o pipefail
           cd sdk_tests/python
           pytest -v --tb=short --junitxml=test-results.xml 2>&1 | tee test-output.txt
 
@@ -297,8 +298,8 @@ jobs:
             --region ${{ env.GKE_REGION }} --project cbs-poctest
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
           for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-              echo "Proxy is healthy!"
+            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+              echo "Proxy is ready!"
               break
             fi
             echo "Waiting for port-forward... ($i/20)"
@@ -313,7 +314,7 @@ jobs:
           GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
           TEST_PREFIX: "sdk-javav1-${{ github.run_id }}/"
-        run: mvn test -B 2>&1 | tee test-output.txt
+        run: set -o pipefail && mvn test -B 2>&1 | tee test-output.txt
 
       - name: Upload Results
         if: always()
@@ -357,8 +358,8 @@ jobs:
             --region ${{ env.GKE_REGION }} --project cbs-poctest
           kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
           for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-              echo "Proxy is healthy!"
+            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+              echo "Proxy is ready!"
               break
             fi
             echo "Waiting for port-forward... ($i/20)"
@@ -375,7 +376,7 @@ jobs:
           TEST_PREFIX: "sdk-javav2-${{ github.run_id }}/"
           AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
           AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
-        run: mvn test -B 2>&1 | tee test-output.txt
+        run: set -o pipefail && mvn test -B 2>&1 | tee test-output.txt
 
       - name: Upload Results
         if: always()
@@ -417,19 +418,10 @@ jobs:
         with:
           install_components: gke-gcloud-auth-plugin
 
-      - name: Get GKE Credentials & Port Forward
+      - name: Get GKE Credentials
         run: |
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
-          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-              echo "Proxy is healthy!"
-              break
-            fi
-            echo "Waiting for port-forward... ($i/20)"
-            sleep 2
-          done
 
       - name: Build Tests
         working-directory: sdk_tests/cpp
@@ -437,7 +429,7 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=$CMAKE_TOOLCHAIN_FILE
           cmake --build build -j$(nproc)
 
-      - name: Run Tests
+      - name: Port Forward & Run Tests
         working-directory: sdk_tests/cpp
         env:
           PROXY_ENDPOINT: http://localhost:8080
@@ -447,6 +439,16 @@ jobs:
           TEST_PREFIX: "sdk-cpp-${{ github.run_id }}/"
           AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
         run: |
+          set -o pipefail
+          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+              echo "Proxy is ready!"
+              break
+            fi
+            echo "Waiting for port-forward... ($i/20)"
+            sleep 2
+          done
           cd build
           ctest --output-on-failure -V 2>&1 | tee ../test-output.txt
 
@@ -514,3 +516,19 @@ jobs:
 
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Triggered by: \`${{ github.event_name }}\` on \`${{ github.ref }}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Fail if any SDK had failures
+        run: |
+          ANY_FAIL=false
+          for dir in results/*/; do
+            f="${dir}test-output.txt"
+            [ -f "$f" ] || continue
+            if grep -qE '^FAIL|--- FAIL:|\[  FAILED  \]|FAILED|BUILD FAILURE|Failures: [1-9]|Errors: [1-9]' "$f" 2>/dev/null; then
+              echo "::error::Test failures detected in $(basename $dir)"
+              ANY_FAIL=true
+            fi
+          done
+          if $ANY_FAIL; then
+            echo "One or more SDK tests failed. Marking workflow as failed."
+            exit 1
+          fi
