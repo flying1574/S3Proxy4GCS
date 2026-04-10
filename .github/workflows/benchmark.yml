@@ -161,21 +161,21 @@ jobs:
           kubectl logs job/benchmark -n ${{ env.K8S_NAMESPACE }} > results/benchmark_output.txt 2>&1 || true
 
           # Extract the JSON report from logs using markers
-          python3 -c "
-import sys
-text = open('results/benchmark_output.txt').read()
-start_marker = 'BENCHMARK_JSON_START'
-end_marker = 'BENCHMARK_JSON_END'
-start = text.find(start_marker)
-end = text.find(end_marker)
-if start >= 0 and end >= 0:
-    json_text = text[start + len(start_marker):end].strip()
-    with open('results/benchmark_report.json', 'w') as f:
-        f.write(json_text)
-    print('JSON report extracted successfully')
-else:
-    print('WARNING: No JSON markers found in logs')
-" || true
+          python3 << 'PYEOF'
+          import sys
+          text = open('results/benchmark_output.txt').read()
+          start_marker = 'BENCHMARK_JSON_START'
+          end_marker = 'BENCHMARK_JSON_END'
+          start = text.find(start_marker)
+          end = text.find(end_marker)
+          if start >= 0 and end >= 0:
+              json_text = text[start + len(start_marker):end].strip()
+              with open('results/benchmark_report.json', 'w') as f:
+                  f.write(json_text)
+              print('JSON report extracted successfully')
+          else:
+              print('WARNING: No JSON markers found in logs')
+          PYEOF
 
           # Show summary from logs
           echo "=== Benchmark Output (tail) ==="
