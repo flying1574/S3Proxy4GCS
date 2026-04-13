@@ -75,6 +75,10 @@ These features intercept high-frequency data path operations or require heavy ba
 **Issue**: Previously believed GCS S3-compatible API did not support bulk `DeleteObjects`.
 **Resolution**: GCS XML API natively supports `POST /?delete` for bulk deletion of up to 1000 objects per request. The proxy transparently passes through the request with SigV4 re-signing. No fan-out or special handling required.
 
+#### 4. UploadPartCopy - **[Native ✅]**
+**Issue**: Previously believed to require large memory buffers for proxy-side implementation.
+**Resolution**: GCS S3-compatible API natively supports `UploadPartCopy` (`PUT` with `x-amz-copy-source` + `uploadId` + `partNumber`). The proxy transparently passes through with SigV4 re-signing. No buffering or special handling required.
+
 #### 5. Inventory Data Manifests - **[Deferred]**
 **Issue**: Automations expect specific S3 Inventory output formats.
 **Proxy Impact**: Requires External Stateful ETL Worker.
