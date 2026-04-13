@@ -34,64 +34,18 @@ Available Configuration Options:
 -   `READ_BUFFER_SIZE` (Default: `65536`): TCP read buffer size (bytes) for the GET/HEAD read-path Transport. Larger values improve download throughput for large objects.
 -   `WRITE_BUFFER_SIZE` (Default: `65536`): TCP write buffer size (bytes) for the PUT/POST/DELETE write-path Transport. Larger values improve upload throughput for large objects.
 
-## Using with standard AWS S3 SDK (Zero Code Change via HTTP_PROXY)
+## Alternative: Transparent Routing via HTTP_PROXY
 
-You can route all traffic from your S3 client application to the proxy transparently by setting standard proxy environment variables. This allows you to use standard S3 endpoints in your code without modifying the initialization logic.
+> **Note**: The recommended approach is direct endpoint configuration (see [Per-SDK Client Configuration](#per-sdk-client-configuration) below). This section documents an alternative approach using system proxy environment variables.
 
-### 1. Set Environment Variables
-Set the `HTTP_PROXY` or `HTTPS_PROXY` (depending on whether your proxy uses TLS) to point to your local proxy instance.
+You can route all traffic from your S3 client application to the proxy transparently by setting standard proxy environment variables:
 
 ```bash
-export HTTP_PROXY=http://localhost:8081
-export HTTPS_PROXY=http://localhost:8081
+export HTTP_PROXY=http://localhost:8080
+export HTTPS_PROXY=http://localhost:8080
 ```
 
-### 2. Configure Client to use PathStyle
-While you don't need to change the endpoint or transport, ensure your SDK is configured to use **Path-Style addressing** (required for GCS S3 compatibility).
-
----
-
-## Using with standard AWS S3 SDK (Explicit Client Transport)
-
-Instead of setting a system-wide environment variable, you can configure your S3 client's `HTTPClient` transport to route traffic to the proxy while keeping standard endpoints in signatures. This allows you guards against side effects for non-S3 traffic.
-
-### Go SDK v2 Example
-
-```go
-import (
-	"context"
-	"net"
-	"net/http"
-	"strings"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-)
-
-func createS3Client() (*s3.Client, error) {
-	dialer := &net.Dialer{}
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if strings.HasPrefix(addr, "storage.googleapis.com") {
-				return dialer.DialContext(ctx, network, "localhost:8081")
-			}
-			return dialer.DialContext(ctx, network, addr)
-		},
-	}
-
-	cfg, err := config.LoadDefaultConfig(context.TODO())
-	if err != nil {
-		return nil, err
-	}
-
-	return s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.UsePathStyle = true
-		o.HTTPClient = &http.Client{Transport: transport}
-		o.BaseEndpoint = aws.String("http://storage.googleapis.com")
-	}), nil
-}
-```
+This allows you to use standard S3 endpoints in your code without modifying the initialization logic. However, this affects all HTTP traffic in the process, not just S3 calls.
 
 ## Architecture
 
@@ -131,8 +85,8 @@ graph TB
         subgraph DataPlane["Data Plane — Reverse Proxy"]
             direction TB
             RP["httputil.ReverseProxy"]
-            Director["Director<br/>① Storage Class Mapping<br/>② x-id Stripping<br/>③ Accept-Encoding Fix<br/>④ Versioning Interop Header<br/>⑤ SigV4 Re-signing"]
-            ModResp["ModifyResponse<br/>x-goog-generation → x-amz-version-id"]
+            Director["Director<br/>① Virtual-Hosted → Path-Style<br/>② Storage Class Mapping<br/>③ x-id Stripping<br/>④ Header Stripping<br/>⑤ SigV4 Re-signing"]
+            ModResp["ModifyResponse<br/>Response Header Cleanup"]
             RP --> Director
             RP --> ModResp
         end
@@ -294,7 +248,7 @@ The proxy Director automatically strips the following headers before SigV4 re-si
 | `User-Agent` | All | AWS-format UA included in signature but not expected by GCS |
 | `Content-Md5` | Go V1, Java V1 | Stripped by default (SDK-computed MD5 invalidated after re-signing); **exception: `POST ?delete` — proxy recomputes MD5 from body** (GCS requires `Content-MD5` or `x-amz-checksum-*` for bulk delete) |
 | `Expect` | Go V1 | `100-continue` interferes with GCS signature verification |
-| `Accept-Encoding` | Go V1 | GCS modifies this in transport, causing canonical request mismatch |
+| `Accept-Encoding` | Go V2 | Go V2 gzip middleware sends `identity`, GCS modifies in transport causing canonical request mismatch |
 | `Amz-Sdk-Invocation-Id` | Java V1/V2 | AWS internal tracking ID, not recognized by GCS |
 | `Amz-Sdk-Request` | Java V1/V2 | AWS retry metadata, not recognized by GCS |
 | `X-Amz-Decoded-Content-Length` | Java V1/V2 | aws-chunked related, meaningless after decode |
@@ -314,26 +268,29 @@ When `PROXY_BASE_DOMAIN` is not set (default), this feature is disabled and all 
 
 ### Per-SDK Client Configuration
 
-#### Go V2 — No special configuration needed
+#### Go V2 — Zero configuration
 
 ```go
 client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-    o.UsePathStyle = true
     o.BaseEndpoint = aws.String("http://PROXY_ENDPOINT")
 })
 ```
 
-#### Go V1 — No special configuration needed
+> With `PROXY_BASE_DOMAIN` enabled, no path-style needed. Without it, add `o.UsePathStyle = true`.
+
+#### Go V1 — Zero configuration
 
 ```go
 sess, _ := session.NewSession(&aws.Config{
-    Endpoint:         aws.String("http://PROXY_ENDPOINT"),
-    Region:           aws.String("us-east-1"),
-    S3ForcePathStyle: aws.Bool(true),
+    Endpoint:    aws.String("http://PROXY_ENDPOINT"),
+    Region:      aws.String("us-east-1"),
+    Credentials: credentials.NewStaticCredentials(access, secret, ""),
 })
 ```
 
-#### Python (boto3) — No special configuration needed
+> With `PROXY_BASE_DOMAIN` enabled, no path-style needed. Without it, add `S3ForcePathStyle: aws.Bool(true)`.
+
+#### Python (boto3) — Zero configuration
 
 ```python
 client = boto3.client(
@@ -342,9 +299,10 @@ client = boto3.client(
     aws_access_key_id=HMAC_ACCESS,
     aws_secret_access_key=HMAC_SECRET,
     region_name="us-east-1",
-    config=Config(s3={"addressing_style": "path"}),
 )
 ```
+
+> With `PROXY_BASE_DOMAIN` enabled, no path-style needed. Without it, add `config=Config(s3={"addressing_style": "path"})`.
 
 #### Java V1 — Disable chunked encoding
 
@@ -352,10 +310,11 @@ client = boto3.client(
 AmazonS3 s3 = AmazonS3ClientBuilder.standard()
     .withEndpointConfiguration(new EndpointConfiguration("http://PROXY_ENDPOINT", "us-east-1"))
     .withCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials(access, secret)))
-    .withPathStyleAccessEnabled(true)
     .withChunkedEncodingDisabled(true)  // Required: disable aws-chunked body framing
     .build();
 ```
+
+> With `PROXY_BASE_DOMAIN` enabled, no path-style needed. Without it, add `.withPathStyleAccessEnabled(true)`.
 
 #### Java V2 — Disable chunked encoding and set env vars
 
@@ -365,7 +324,6 @@ S3Client s3 = S3Client.builder()
     .region(Region.US_EAST_1)
     .credentialsProvider(StaticCredentialsProvider.create(
         AwsBasicCredentials.create(access, secret)))
-    .forcePathStyle(true)
     .serviceConfiguration(S3Configuration.builder()
         .chunkedEncodingEnabled(false)      // Required: disable aws-chunked framing
         .build())
@@ -378,6 +336,8 @@ export AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED
 export AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED
 ```
 
+> With `PROXY_BASE_DOMAIN` enabled, no path-style needed. Without it, add `.forcePathStyle(true)`.
+
 #### C++ — Disable payload signing and set env var
 
 ```cpp
@@ -388,7 +348,7 @@ config.region = "us-east-1";
 auto s3 = Aws::MakeShared<Aws::S3::S3Client>("s3",
     creds, config,
     Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,  // Recommended
-    /* useVirtualAddressing */ false);
+    /* useVirtualAddressing */ true);
 ```
 
 **Required environment variable:**
@@ -396,16 +356,20 @@ auto s3 = Aws::MakeShared<Aws::S3::S3Client>("s3",
 export AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED
 ```
 
+> With `PROXY_BASE_DOMAIN` enabled, virtual-hosted style works by default. Without it, set `useVirtualAddressing` to `false`.
+
 ### Quick Reference
 
 | SDK | Special Config | Env Vars | Difficulty |
 |---|---|---|---|
-| **Go V2** | None | None | Zero-config |
-| **Go V1** | None | None | Zero-config |
-| **Python** | None | None | Zero-config |
-| **Java V1** | `ChunkedEncodingDisabled` | None | Low |
+| **Go V2** | None | None | **Zero-config** |
+| **Go V1** | None | None | **Zero-config** |
+| **Python** | None | None | **Zero-config** |
+| **Java V1** | `chunkedEncodingDisabled(true)` | None | Low |
 | **Java V2** | `chunkedEncodingEnabled(false)` | `AWS_REQUEST_CHECKSUM_CALCULATION`, `AWS_RESPONSE_CHECKSUM_VALIDATION` | Medium |
 | **C++** | `PayloadSigningPolicy::Never` (recommended) | `AWS_REQUEST_CHECKSUM_CALCULATION` | Low |
+
+> **Note**: With `PROXY_BASE_DOMAIN` enabled on the server, all SDKs can use default virtual-hosted addressing. Path-style configuration is only needed when `PROXY_BASE_DOMAIN` is not set.
 
 ---
 

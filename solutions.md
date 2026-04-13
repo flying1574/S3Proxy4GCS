@@ -88,7 +88,7 @@ These features intercept high-frequency data path operations or require heavy ba
 
 ## SDK Compatibility & Client-Side Workarounds
 
-The proxy has been validated against **6 AWS SDKs** with full data-plane and control-plane test coverage (54/54 PASS). Below documents both the known issues and the required client-side configurations for each SDK.
+The proxy has been validated against **6 AWS SDKs** with full data-plane and control-plane test coverage (60/60 PASS). Below documents both the known issues and the required client-side configurations for each SDK.
 
 ### Known Issues & Solutions
 
@@ -117,6 +117,7 @@ The proxy has been validated against **6 AWS SDKs** with full data-plane and con
 #### 5. Java V2 CopyObject (`411 Length Required`)
 **Issue**: The default `UrlConnectionHttpClient` in the Java V2 SDK incorrectly omits the `Content-Length: 0` header on empty `PUT` requests, causing GCS to reject `CopyObject`.
 **Solution**: Explicitly bind the alternative `ApacheHttpClient` in the Java V2 client configuration, which correctly transmits the `Content-Length` header.
+**Status**: ⚠️ Known issue, not yet implemented in proxy. Client-side workaround required.
 
 #### 6. RestoreObject
 **Issue**: Throws `InvalidArgument` against GCS.
@@ -133,9 +134,7 @@ The proxy has been validated against **6 AWS SDKs** with full data-plane and con
 
 #### 8. Versioning (ListObjectVersions / HeadObject)
 **Issue**: GCS uses `<Generation>` instead of `<VersionId>`.
-**Proxy Solution (Validated)**: 
-- Intercept `ListObjectVersions` and inject the header `x-amz-interop-list-objects-format: enabled` to force S3-compatible XML.
-- Intercept responses for metadata operations (like `HeadObject`) and map the `x-goog-generation` response header back to `x-amz-version-id`.
+**Resolution**: GCS S3-compatible API natively handles versioning interop (generation ↔ version-id mapping) without proxy intervention. The proxy transparently passes through versioning requests. No special header injection or response rewriting is needed.
 
 ---
 
@@ -148,7 +147,7 @@ The proxy Director strips the following headers before SigV4 re-signing to ensur
 | `User-Agent` | All SDKs | AWS-format User-Agent interferes with GCS canonical request |
 | `Content-Md5` | Go V1, Java V1 | SDK-computed MD5 invalidated after re-signing |
 | `Expect` | Go V1 | `100-continue` causes GCS signature mismatch |
-| `Accept-Encoding` | Go V1 | GCS modifies value in transport → canonical request mismatch |
+| `Accept-Encoding` | Go V2 | Go V2 gzip middleware sends `identity`, GCS modifies in transport → canonical request mismatch |
 | `Amz-Sdk-Invocation-Id` | Java V1/V2 | AWS internal tracking, GCS rejects unknown signed headers |
 | `Amz-Sdk-Request` | Java V1/V2 | AWS retry metadata, not recognized by GCS |
 | `X-Amz-Decoded-Content-Length` | Java V1/V2 | aws-chunked artifact, meaningless after unwrap |
@@ -159,35 +158,31 @@ The proxy Director strips the following headers before SigV4 re-signing to ensur
 
 ### Per-SDK Required Configuration
 
-#### Go V2 (aws-sdk-go-v2 v1.35+) — Zero Configuration
+#### Go V2 (aws-sdk-go-v2 v1.75+) — Zero Configuration
 ```go
-o.UsePathStyle = true
 o.BaseEndpoint = aws.String(proxyEndpoint)
 ```
-No special flags or env vars needed.
+No special flags or env vars needed. With `PROXY_BASE_DOMAIN` enabled, no path-style config required.
 
 #### Go V1 (aws-sdk-go v1.50+) — Zero Configuration
 ```go
-S3ForcePathStyle: aws.Bool(true),
+Endpoint: aws.String(proxyEndpoint),
 ```
-No special flags or env vars needed. The proxy automatically strips `Content-MD5`, `Expect`, and `Accept-Encoding` headers before re-signing.
+No special flags or env vars needed. The proxy automatically strips `Content-MD5`, `Expect`, and `Accept-Encoding` headers before re-signing. With `PROXY_BASE_DOMAIN` enabled, no path-style config required.
 
 #### Python / boto3 (1.42+) — Zero Configuration
 ```python
-config=Config(s3={"addressing_style": "path"})
+endpoint_url=proxy_endpoint
 ```
-No special flags or env vars needed.
+No special flags or env vars needed. With `PROXY_BASE_DOMAIN` enabled, no path-style config required.
 
 #### Java V1 (1.12+) — 1 Required Setting
 ```java
-// Builder:
-.withPathStyleAccessEnabled(true)
 .withChunkedEncodingDisabled(true)
 ```
 
 #### Java V2 (2.20+) — 1 Code Setting + 2 Env Vars
 ```java
-.forcePathStyle(true)
 .serviceConfiguration(S3Configuration.builder()
     .chunkedEncodingEnabled(false)
     .build())
@@ -197,9 +192,11 @@ No special flags or env vars needed.
 #### C++ (1.11+) — 1 Recommended Setting + 1 Env Var
 ```cpp
 Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never  // Recommended
-/* useVirtualAddressing */ false
+/* useVirtualAddressing */ true
 ```
 **Required env var:** `AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED`
+
+> **Note**: With `PROXY_BASE_DOMAIN` set on the server, all SDKs can use default virtual-hosted addressing. Path-style is only needed when `PROXY_BASE_DOMAIN` is not configured.
 
 ---
 
@@ -264,7 +261,7 @@ All standard S3 object operations streamed through `httputil.ReverseProxy` with 
 |---|---|---|
 | **Reverse Proxy (Streaming)** | ✅ Implemented | High-performance streaming with tuned connection pooling |
 | **Storage Class Translation** | ✅ Implemented | STANDARD_IA→NEARLINE, GLACIER→ARCHIVE, INTELLIGENT_TIERING→AUTOCLASS, etc. |
-| **Versioning Interop** | ✅ Implemented | x-goog-generation ↔ x-amz-version-id bi-directional mapping |
+| **Versioning Interop** | ✅ Native (GCS) | GCS S3-compatible API handles generation ↔ version-id natively, transparent pass-through |
 | **SigV4 Re-signing** | ✅ Implemented | Automatic re-sign on header/query modification |
 | **x-id Stripping** | ✅ Implemented | Remove AWS SDK v2 tracking query parameter |
 | **DeleteObjects (Bulk)** | ✅ Implemented | GCS XML API natively supports POST /?delete (up to 1000 objects), transparent pass-through |
@@ -291,14 +288,14 @@ Health probes, metrics, logging infrastructure, and operational safeguards.
 | **Unit Tests** | ✅ Implemented | 17 tests across all `pkg/translate` modules |
 | **Integration Tests** | ✅ Implemented | Isolated Go module, auto-spawns local proxy in DryRun |
 | **E2E Acceptance Tests** | ✅ Implemented | Functional + Stability + Benchmark suites against live proxy |
-| **Multi-SDK Tests** | ✅ Validated | 6 SDKs × 10 tests = 60/60 PASS (Go V2, Go V1, Python, Java V1, Java V2, C++) |
+| **Multi-SDK Tests** | ✅ Validated | 6 SDKs (Go V2, Go V1, Python, Java V1, Java V2, C++) — 60+ tests, all PASS |
 | **CI/CD (GitHub Actions)** | ✅ Implemented | E2E workflow (3 parallel jobs) + Multi-SDK workflow (6 SDK jobs) |
 
 ---
 
 ## Open Questions & Next Steps
 
-1. ~~**Target SDKs Compatibility**: The target SDKs are **Go, Java, Python, and C++**.~~ **✅ Resolved**: All 6 SDKs (Go V2, Go V1, Python, Java V1, Java V2, C++) validated with 54/54 tests passing. See [Per-SDK Required Configuration](#per-sdk-required-configuration) above.
+1. ~~**Target SDKs Compatibility**: The target SDKs are **Go, Java, Python, and C++**.~~ **✅ Resolved**: All 6 SDKs (Go V2, Go V1, Python, Java V1, Java V2, C++) validated with 60+ tests passing. See [Per-SDK Required Configuration](#per-sdk-required-configuration) above.
 2. **Consistency Requirements**: For features like Tagging via Metadata, is the eventual consistency of GCS metadata acceptable for the customer's application logic?
 3. ~~**Performance Hardening**: Consider implementing request body size limits (`MaxBytesReader`), server-level timeouts, and concurrency limiting middleware.~~ **✅ Resolved**: Implemented read/write split Transport (separate GET/HEAD vs PUT/POST/DELETE proxies with optimized buffer sizes), global SigV4 signer reuse, streaming MD5 for DeleteObjects, parameterized connection pool timeouts (IdleConnTimeout, ResponseHeaderTimeout), and concurrency limiter middleware. **K8s deployment must use Guaranteed QoS (requests==limits) + Pod anti-affinity** — Burstable QoS causes 30~60% throughput loss due to CFS throttling on overcommitted nodes.
 4. ~~**E2E Validation**: Run the E2E acceptance test suite against a live GKE deployment to validate all translations end-to-end.~~ **✅ Resolved**: E2E tests and Multi-SDK CI pipeline validated on GKE.
@@ -318,9 +315,7 @@ To serve high concurrent requests robustly, we evaluate:
 | **Connection Pooling** | Harder to tune kernel-level limits | Ultimate control over TCP/IP tuning |
 | **Cost at Scale** | Linear with requests | Dense utilization is cheaper |
 
-**Recommendation**: 
-- **Start with Cloud Run** using `min-instances` and `CPU always allocated`. It is often fast enough (especially using Go) and avoids the massive overhead of K8s.
-- **Pivot to GKE** if we hit hard limits on TCP connection reuse, or if the sheer volume makes sustained VM pools significantly cheaper than Serverless compute.
+**Decision**: **GKE** is the production deployment target. GKE provides full control over TCP connection pooling, zero cold starts, and Guaranteed QoS (requests == limits) which is critical for proxy workloads. Cloud Run's cold start latency and limited TCP tuning make it unsuitable for a latency-sensitive proxy.
 
 ### 2. Coding Language
 For a high-performance, low-latency proxy:

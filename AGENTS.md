@@ -23,7 +23,11 @@ The goal is to serve as a transparent middleware for S3 protocols to translate u
 
 - `main.go`: Entry point for the Chi router setup.
 - `config/settings.go`: Parameter load path.
-- `pkg/translate`: Location for XML translation logic (implements S3 Lifecycle).
+- `pkg/translate/`: Location for XML translation logic (S3 XML ↔ GCS JSON).
+- `e2e_tests/`: E2E acceptance tests (functional, stability, benchmark) against live proxy.
+- `sdk_tests/`: Multi-SDK compatibility tests (Go V2, Go V1, Python, Java V1, Java V2, C++).
+- `integration_tests/`: Local integration tests with DryRun proxy.
+- `.github/workflows/`: CI/CD pipelines (e2e-tests, multi-sdk-tests, benchmark).
 - `.env`: Secret bind template. Use `GCS_PREFIX` for test isolation.
 
 ---
