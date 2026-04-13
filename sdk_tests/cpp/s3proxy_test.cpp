@@ -88,6 +88,8 @@ protected:
 
         s3 = std::make_shared<Aws::S3::S3Client>(
             creds, config,
+            // Recommended: proxy re-signs with UNSIGNED-PAYLOAD, this avoids
+            // redundant SHA-256 computation on the client side.
             Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
             /* useVirtualAddressing */ false);
     }

@@ -102,9 +102,7 @@ The proxy has been validated against **6 AWS SDKs** with full data-plane and con
 #### 2. Content-MD5 Header Conflict
 **Issue**: Go V1 and Java V1 SDKs compute `Content-MD5` and include it in the signed request. After proxy re-signing, this header causes GCS signature verification to fail.
 **Solution**:
-- **Client**: Go V1 — set `S3DisableContentMD5Validation: aws.Bool(true)`
-- **Client**: Java V1 — set system property `com.amazonaws.services.s3.disablePutObjectMD5Validation=true`
-- **Proxy**: Automatically strips `Content-Md5` header before re-signing
+- **Proxy**: Automatically strips `Content-Md5` header before re-signing (no client-side config needed)
 
 #### 3. Accept-Encoding Header (Go V1 403 Root Cause)
 **Issue**: Go V1 SDK sends `Accept-Encoding` header which gets included in `SignedHeaders`. GCS modifies or strips this header during HTTP transport, causing the canonical request to not match the signed request, resulting in `403 SignatureDoesNotMatch`.
@@ -114,8 +112,7 @@ The proxy has been validated against **6 AWS SDKs** with full data-plane and con
 #### 4. Expect: 100-Continue (Go V1)
 **Issue**: Go V1 SDK sends `Expect: 100-continue` header that interferes with GCS HMAC signature verification.
 **Solution**:
-- **Client**: Set `S3Disable100Continue: aws.Bool(true)`
-- **Proxy**: Automatically strips `Expect` header before re-signing
+- **Proxy**: Automatically strips `Expect` header before re-signing (no client-side config needed)
 
 #### 5. Java V2 CopyObject (`411 Length Required`)
 **Issue**: The default `UrlConnectionHttpClient` in the Java V2 SDK incorrectly omits the `Content-Length: 0` header on empty `PUT` requests, causing GCS to reject `CopyObject`.
@@ -169,12 +166,11 @@ o.BaseEndpoint = aws.String(proxyEndpoint)
 ```
 No special flags or env vars needed.
 
-#### Go V1 (aws-sdk-go v1.50+) — 2 Required Flags
+#### Go V1 (aws-sdk-go v1.50+) — Zero Configuration
 ```go
-S3ForcePathStyle:              aws.Bool(true),
-S3DisableContentMD5Validation: aws.Bool(true),  // Avoid Content-MD5 re-sign conflict
-S3Disable100Continue:          aws.Bool(true),   // Avoid Expect header interference
+S3ForcePathStyle: aws.Bool(true),
 ```
+No special flags or env vars needed. The proxy automatically strips `Content-MD5`, `Expect`, and `Accept-Encoding` headers before re-signing.
 
 #### Python / boto3 (1.42+) — Zero Configuration
 ```python
@@ -182,27 +178,25 @@ config=Config(s3={"addressing_style": "path"})
 ```
 No special flags or env vars needed.
 
-#### Java V1 (1.12+) — 2 Required Settings
+#### Java V1 (1.12+) — 1 Required Setting
 ```java
-System.setProperty("com.amazonaws.services.s3.disablePutObjectMD5Validation", "true");
 // Builder:
 .withPathStyleAccessEnabled(true)
 .withChunkedEncodingDisabled(true)
 ```
 
-#### Java V2 (2.20+) — 2 Code Settings + 2 Env Vars
+#### Java V2 (2.20+) — 1 Code Setting + 2 Env Vars
 ```java
 .forcePathStyle(true)
 .serviceConfiguration(S3Configuration.builder()
-    .checksumValidationEnabled(false)
     .chunkedEncodingEnabled(false)
     .build())
 ```
 **Required env vars:** `AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED`, `AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED`
 
-#### C++ (1.11+) — 1 Code Setting + 1 Env Var
+#### C++ (1.11+) — 1 Recommended Setting + 1 Env Var
 ```cpp
-Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never
+Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never  // Recommended
 /* useVirtualAddressing */ false
 ```
 **Required env var:** `AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED`

@@ -311,15 +311,13 @@ client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 })
 ```
 
-#### Go V1 — Disable MD5 and 100-Continue
+#### Go V1 — No special configuration needed
 
 ```go
 sess, _ := session.NewSession(&aws.Config{
-    Endpoint:                      aws.String("http://PROXY_ENDPOINT"),
-    Region:                        aws.String("us-east-1"),
-    S3ForcePathStyle:              aws.Bool(true),
-    S3DisableContentMD5Validation: aws.Bool(true), // Required: avoid Content-MD5 re-sign conflict
-    S3Disable100Continue:          aws.Bool(true),  // Required: avoid Expect header interference
+    Endpoint:         aws.String("http://PROXY_ENDPOINT"),
+    Region:           aws.String("us-east-1"),
+    S3ForcePathStyle: aws.Bool(true),
 })
 ```
 
@@ -336,12 +334,9 @@ client = boto3.client(
 )
 ```
 
-#### Java V1 — Disable MD5 validation and chunked encoding
+#### Java V1 — Disable chunked encoding
 
 ```java
-// Required: GCS returns non-MD5 ETags
-System.setProperty("com.amazonaws.services.s3.disablePutObjectMD5Validation", "true");
-
 AmazonS3 s3 = AmazonS3ClientBuilder.standard()
     .withEndpointConfiguration(new EndpointConfiguration("http://PROXY_ENDPOINT", "us-east-1"))
     .withCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials(access, secret)))
@@ -350,7 +345,7 @@ AmazonS3 s3 = AmazonS3ClientBuilder.standard()
     .build();
 ```
 
-#### Java V2 — Disable checksums, chunked encoding, and set env vars
+#### Java V2 — Disable chunked encoding and set env vars
 
 ```java
 S3Client s3 = S3Client.builder()
@@ -360,7 +355,6 @@ S3Client s3 = S3Client.builder()
         AwsBasicCredentials.create(access, secret)))
     .forcePathStyle(true)
     .serviceConfiguration(S3Configuration.builder()
-        .checksumValidationEnabled(false)   // Required: disable Flexible Checksums
         .chunkedEncodingEnabled(false)      // Required: disable aws-chunked framing
         .build())
     .build();
@@ -381,7 +375,7 @@ config.region = "us-east-1";
 
 auto s3 = Aws::MakeShared<Aws::S3::S3Client>("s3",
     creds, config,
-    Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,  // Required
+    Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,  // Recommended
     /* useVirtualAddressing */ false);
 ```
 
@@ -395,11 +389,11 @@ export AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED
 | SDK | Special Config | Env Vars | Difficulty |
 |---|---|---|---|
 | **Go V2** | None | None | Zero-config |
+| **Go V1** | None | None | Zero-config |
 | **Python** | None | None | Zero-config |
-| **Go V1** | `S3DisableContentMD5Validation`, `S3Disable100Continue` | None | Low |
-| **Java V1** | `disablePutObjectMD5Validation`, `ChunkedEncodingDisabled` | None | Low |
-| **Java V2** | `checksumValidationEnabled(false)`, `chunkedEncodingEnabled(false)` | `AWS_REQUEST_CHECKSUM_CALCULATION`, `AWS_RESPONSE_CHECKSUM_VALIDATION` | Medium |
-| **C++** | `PayloadSigningPolicy::Never` | `AWS_REQUEST_CHECKSUM_CALCULATION` | Low |
+| **Java V1** | `ChunkedEncodingDisabled` | None | Low |
+| **Java V2** | `chunkedEncodingEnabled(false)` | `AWS_REQUEST_CHECKSUM_CALCULATION`, `AWS_RESPONSE_CHECKSUM_VALIDATION` | Medium |
+| **C++** | `PayloadSigningPolicy::Never` (recommended) | `AWS_REQUEST_CHECKSUM_CALCULATION` | Low |
 
 ---
 
