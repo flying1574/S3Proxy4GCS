@@ -29,6 +29,7 @@ type Settings struct {
 	ProxyAccessKey        string        // For re-signing
 	ProxySecretKey        string        // For re-signing
 	JSONKey               string        // Path to GCS Service Account JSON key
+	ProxyBaseDomain       string        // Base domain for virtual-hosted style support
 }
 
 var Config *Settings
@@ -139,6 +140,7 @@ func LoadConfig() {
 		ProxyAccessKey:        getEnv("PROXY_AWS_ACCESS_KEY_ID", getEnv("AWS_ACCESS_KEY_ID", "")),
 		ProxySecretKey:        getEnv("PROXY_AWS_SECRET_ACCESS_KEY", getEnv("AWS_SECRET_ACCESS_KEY", "")),
 		JSONKey:               getEnv("JSON_KEY", ""),
+		ProxyBaseDomain:       getEnv("PROXY_BASE_DOMAIN", ""),
 	}
 
 	// Validate required fields for non-DryRun mode

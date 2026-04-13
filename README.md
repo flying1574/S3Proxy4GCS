@@ -24,6 +24,7 @@ Available Configuration Options:
 -   `DRY_RUN` (Default: `true`): Disables real GCS API hits (safe for laptop testing). Set to `false` for live integration.
 -   `JSON_KEY`: Path to the Google Cloud Service Account JSON key (required for real GCS API calls like Website/CORS).
 -   `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`: Proxy's HMAC credentials for re-signing requests to GCS.
+-   `PROXY_BASE_DOMAIN`: Base domain for virtual-hosted style support (e.g. `s3proxy.example.com`). When set, the proxy automatically converts virtual-hosted style requests (`bucket.s3proxy.example.com/key`) to path-style (`/bucket/key`). Requires wildcard DNS (`*.s3proxy.example.com → proxy IP`). Default: empty (disabled).
 -   `MAX_IDLE_CONNS` (Default: `1000`): Maximum idle connections for the reverse proxy.
 -   `MAX_IDLE_CONNS_PER_HOST` (Default: `1000`): Maximum idle connections per host for the reverse pool.
 -   `MAX_CONCURRENT_REQUESTS` (Default: `1000`): Maximum number of requests processed concurrently. Excess requests receive `503 Service Unavailable`. Set to `0` to disable throttling. **This value should be tuned based on machine resources (CPU cores, memory) and GCS API rate limits through performance benchmarking.**
@@ -299,6 +300,17 @@ The proxy Director automatically strips the following headers before SigV4 re-si
 | `X-Amz-Decoded-Content-Length` | Java V1/V2 | aws-chunked related, meaningless after decode |
 | `X-Amz-Trailer` | Java V2 | Flexible Checksums trailer declaration |
 | `Content-Encoding` (aws-chunked) | Java V1/V2 | Conditionally removed when value contains `aws-chunked` |
+
+### Virtual-Hosted Style Support
+
+By default, all SDKs must configure **path-style addressing** to work with the proxy. However, if you set `PROXY_BASE_DOMAIN`, the proxy automatically converts virtual-hosted style requests to path-style, allowing SDK clients to use their **default addressing mode** without any configuration.
+
+**Setup:**
+1. Set `PROXY_BASE_DOMAIN` to the proxy's base domain (e.g. `s3proxy.example.com`)
+2. Configure wildcard DNS: `*.s3proxy.example.com → proxy IP`
+3. SDK clients can now use `bucket-name.s3proxy.example.com` as the endpoint without configuring path-style
+
+When `PROXY_BASE_DOMAIN` is not set (default), this feature is disabled and all existing path-style configurations continue to work as before.
 
 ### Per-SDK Client Configuration
 

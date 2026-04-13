@@ -172,6 +172,36 @@ func main() {
 
 	// Shared Director and ModifyResponse applied to both proxies.
 	director := func(req *http.Request) {
+		// Virtual-hosted style -> path-style conversion.
+		// If PROXY_BASE_DOMAIN is set, detect requests like:
+		//   Host: bucket.s3proxy.example.com  GET /key
+		// and rewrite to:
+		//   GET /bucket/key
+		// This allows SDK clients to use default virtual-hosted addressing
+		// without configuring path-style, enabling seamless S3-to-GCS migration.
+		if baseDomain := config.Config.ProxyBaseDomain; baseDomain != "" {
+			host := req.Host
+			// Strip port if present (e.g., "bucket.domain:8080" -> "bucket.domain")
+			if idx := strings.LastIndex(host, ":"); idx != -1 {
+				host = host[:idx]
+			}
+			// Check if host ends with ".baseDomain"
+			suffix := "." + baseDomain
+			if strings.HasSuffix(host, suffix) {
+				bucket := strings.TrimSuffix(host, suffix)
+				if bucket != "" {
+					req.URL.Path = "/" + bucket + req.URL.Path
+					// Also fix RawPath if set (supports URL-encoded keys)
+					if req.URL.RawPath != "" {
+						req.URL.RawPath = "/" + bucket + req.URL.RawPath
+					}
+					slog.Info("Virtual-hosted to path-style conversion",
+						"bucket", bucket,
+						"rewrittenPath", req.URL.Path)
+				}
+			}
+		}
+
 		req.URL.Host = gcsURL.Host
 		req.URL.Scheme = gcsURL.Scheme
 		req.Host = gcsURL.Host // Critical for TLS Handshake
