@@ -404,11 +404,11 @@ affinity:
         topologyKey: kubernetes.io/hostname
 ```
 
-### GKE Autopilot Notes
+### GKE Standard Notes
 
-- Autopilot aggressively bin-packs Pods. Nodes can reach **200%+ CPU Limits overcommitment**, causing severe throttling for Burstable Pods.
-- Guaranteed QoS Pods receive dedicated CPU shares and are not subject to CFS throttling.
+- Use **Guaranteed QoS** (`requests == limits`) to avoid CFS throttling under node contention.
 - Enable **Private Google Access (PGA)** on the VPC subnet so Pods access GCS via Google's internal network (lower latency, no NAT).
+- Recommended node machine type: `e2-standard-4` or higher for proxy workloads.
 
 ### Scaling Recommendations
 

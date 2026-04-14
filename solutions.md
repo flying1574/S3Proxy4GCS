@@ -319,7 +319,7 @@ To serve high concurrent requests robustly, we evaluate:
 | **Connection Pooling** | Harder to tune kernel-level limits | Ultimate control over TCP/IP tuning |
 | **Cost at Scale** | Linear with requests | Dense utilization is cheaper |
 
-**Decision**: **GKE** is the production deployment target. GKE provides full control over TCP connection pooling, zero cold starts, and Guaranteed QoS (requests == limits) which is critical for proxy workloads. Cloud Run's cold start latency and limited TCP tuning make it unsuitable for a latency-sensitive proxy.
+**Decision**: **GKE Standard** is the production deployment target. GKE Standard provides full control over node machine types, TCP connection pooling, zero cold starts, and Guaranteed QoS (requests == limits) which is critical for proxy workloads.
 
 ### 2. Coding Language
 For a high-performance, low-latency proxy:
