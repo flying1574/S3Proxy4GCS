@@ -12,10 +12,14 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags="-s -w" -o /s3proxy main.go
 
 # ---- Stage 2: Runtime ----
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM alpine:3.20
 
-COPY --from=builder /s3proxy /s3proxy
+RUN apk add --no-cache ca-certificates bash curl tzdata \
+    && addgroup -S app && adduser -S app -G app
 
+COPY --from=builder /s3proxy /usr/local/bin/s3proxy
+
+USER app
 EXPOSE 8080
 
-ENTRYPOINT ["/s3proxy"]
+ENTRYPOINT ["/usr/local/bin/s3proxy"]
