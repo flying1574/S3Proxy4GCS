@@ -79,6 +79,8 @@ spec:
               value: "20"
             - name: BENCH_DURATION_SEC
               value: "30"
+            - name: PROMETHEUS_URL
+              value: "http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
           resources:
             # Guaranteed QoS: requests == limits to avoid CPU throttling
             requests:

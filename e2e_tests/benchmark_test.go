@@ -73,6 +73,7 @@ type BenchmarkResult struct {
 	AvgMs       float64     `json:"avg_ms"`
 	MaxMs       float64     `json:"max_ms"`
 	System      SystemDelta `json:"system_metrics"`
+	PodMetrics  PodMetrics  `json:"pod_metrics"`
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +164,7 @@ func runConcurrentLoad(concurrency int, duration time.Duration, fn func() error)
 }
 
 // toBenchmarkResult constructs a BenchmarkResult from load results + system delta.
-func toBenchmarkResult(name, payloadSize string, concurrency int, lr loadResult, wallClock time.Duration, delta SystemDelta) BenchmarkResult {
+func toBenchmarkResult(name, payloadSize string, concurrency int, lr loadResult, wallClock time.Duration, delta SystemDelta, pod PodMetrics) BenchmarkResult {
 	opsPerSec := 0.0
 	if wallClock.Seconds() > 0 {
 		opsPerSec = float64(len(lr.latencies)) / wallClock.Seconds()
@@ -188,7 +189,28 @@ func toBenchmarkResult(name, payloadSize string, concurrency int, lr loadResult,
 		AvgMs:       durationMs(avgDuration(lr.latencies)),
 		MaxMs:       maxMs,
 		System:      delta,
+		PodMetrics:  pod,
 	}
+}
+
+// collectPodMetrics queries Prometheus for pod-level signals over the benchmark
+// interval. It expands the window by 15s on each side so the rate(..[30s])
+// windows have enough data. On any error (or if the collector is disabled) it
+// returns a zero-valued PodMetrics; the benchmark must not fail because
+// Prometheus is unreachable.
+func collectPodMetrics(pc *PrometheusCollector, start, end time.Time) PodMetrics {
+	if pc == nil {
+		return PodMetrics{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	padded := 15 * time.Second
+	pod, err := pc.Collect(ctx, start.Add(-padded), end.Add(padded))
+	if err != nil {
+		fmt.Printf("  [prometheus] collection failed: %v\n", err)
+		return PodMetrics{}
+	}
+	return pod
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +246,12 @@ func TestBenchmarkSuite(t *testing.T) {
 	duration := time.Duration(durationSec) * time.Second
 
 	mc := NewMetricsCollector(testEnv.ProxyEndpoint)
+
+	pc := NewPrometheusCollector()
+	if v := os.Getenv("PROMETHEUS_URL"); v == "" {
+		t.Logf("PROMETHEUS_URL not set, falling back to default in-cluster URL")
+	}
+	t.Logf("Prometheus URL: %s", pc.baseURL)
 
 	report := BenchmarkReport{
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),
@@ -267,10 +295,12 @@ func TestBenchmarkSuite(t *testing.T) {
 		})
 
 		wallClock := time.Since(start)
+		end := time.Now()
 		after, _ := mc.Snapshot()
 		delta := ComputeDelta(before, after, wallClock)
+		pod := collectPodMetrics(pc, start, end)
 
-		result := toBenchmarkResult("PutObject_"+tier.Name, tier.Name, concurrency, lr, wallClock, delta)
+		result := toBenchmarkResult("PutObject_"+tier.Name, tier.Name, concurrency, lr, wallClock, delta, pod)
 		report.Results = append(report.Results, result)
 
 		printBenchResult(t, result)
@@ -313,10 +343,12 @@ func TestBenchmarkSuite(t *testing.T) {
 		})
 
 		wallClock := time.Since(start)
+		end := time.Now()
 		after, _ := mc.Snapshot()
 		delta := ComputeDelta(before, after, wallClock)
+		pod := collectPodMetrics(pc, start, end)
 
-		result := toBenchmarkResult("GetObject_"+tier.Name, tier.Name, concurrency, lr, wallClock, delta)
+		result := toBenchmarkResult("GetObject_"+tier.Name, tier.Name, concurrency, lr, wallClock, delta, pod)
 		report.Results = append(report.Results, result)
 
 		printBenchResult(t, result)
@@ -360,10 +392,12 @@ func TestBenchmarkSuite(t *testing.T) {
 	})
 
 	wallClock := time.Since(start)
+	crudEnd := time.Now()
 	after, _ := mc.Snapshot()
 	delta := ComputeDelta(before, after, wallClock)
+	crudPod := collectPodMetrics(pc, start, crudEnd)
 
-	crudResult := toBenchmarkResult("PutGetDelete_CRUD", "1KB", concurrency, crudLR, wallClock, delta)
+	crudResult := toBenchmarkResult("PutGetDelete_CRUD", "1KB", concurrency, crudLR, wallClock, delta, crudPod)
 	report.Results = append(report.Results, crudResult)
 	printBenchResult(t, crudResult)
 
@@ -400,10 +434,12 @@ func TestBenchmarkSuite(t *testing.T) {
 	})
 
 	wallClock = time.Since(start)
+	lcEnd := time.Now()
 	after, _ = mc.Snapshot()
 	delta = ComputeDelta(before, after, wallClock)
+	lcPod := collectPodMetrics(pc, start, lcEnd)
 
-	lcResult := toBenchmarkResult("PutBucketLifecycle", "N/A", concurrency, lcLR, wallClock, delta)
+	lcResult := toBenchmarkResult("PutBucketLifecycle", "N/A", concurrency, lcLR, wallClock, delta, lcPod)
 	report.Results = append(report.Results, lcResult)
 	printBenchResult(t, lcResult)
 
@@ -454,6 +490,35 @@ func TestBenchmarkSuite(t *testing.T) {
 			r.System.PeakResidentMB, r.System.GoroutineDelta, r.System.HTTPRequestsDelta)
 	}
 	fmt.Println("================================================================================")
+
+	// Print pod-level metrics from Prometheus
+	fmt.Println()
+	fmt.Println("  Pod Metrics (from Prometheus, per benchmark):")
+	fmt.Printf("  %-25s %12s %12s %12s %12s %10s %10s\n",
+		"Name", "NetRx(MB/s)", "NetTx(MB/s)", "CPU(cores)", "Mem(MB)", "QPS", "Goroutines")
+	fmt.Println("  " + strings.Repeat("-", 98))
+	for _, r := range report.Results {
+		pm := r.PodMetrics
+		fmt.Printf("  %-25s %12s %12s %12s %12s %10s %10s\n",
+			r.Name,
+			statsMBs(pm.NetRxBps),
+			statsMBs(pm.NetTxBps),
+			statsStr(pm.CPUCores, 2),
+			statsStr(pm.MemoryMB, 1),
+			statsStr(pm.HTTPReqRate, 1),
+			statsStr(pm.Goroutines, 0))
+	}
+	fmt.Println("================================================================================")
+}
+
+// statsStr formats max/avg for a Stats value (compact).
+func statsStr(s Stats, prec int) string {
+	return fmt.Sprintf("%.*f/%.*f", prec, s.Max, prec, s.Avg)
+}
+
+// statsMBs formats Stats in MB/s (from bytes/s).
+func statsMBs(s Stats) string {
+	return fmt.Sprintf("%.2f/%.2f", s.Max/(1024*1024), s.Avg/(1024*1024))
 }
 
 func printBenchResult(t *testing.T, r BenchmarkResult) {
@@ -462,5 +527,10 @@ func printBenchResult(t *testing.T, r BenchmarkResult) {
 	t.Logf("  [system] CPU=%.1f%%  Mem\u0394=%.1fMB  PeakMem=%.1fMB  Goroutine\u0394=%.0f  HTTP\u0394=%.0f",
 		r.System.CPUUsagePercent, r.System.MemoryDeltaMB,
 		r.System.PeakResidentMB, r.System.GoroutineDelta, r.System.HTTPRequestsDelta)
+	pm := r.PodMetrics
+	t.Logf("  [pod] NetRx max=%.2fMB/s avg=%.2fMB/s  NetTx max=%.2fMB/s avg=%.2fMB/s  CPU max=%.2f avg=%.2f  Mem max=%.1fMB",
+		pm.NetRxBps.Max/(1024*1024), pm.NetRxBps.Avg/(1024*1024),
+		pm.NetTxBps.Max/(1024*1024), pm.NetTxBps.Avg/(1024*1024),
+		pm.CPUCores.Max, pm.CPUCores.Avg, pm.MemoryMB.Max)
 	t.Log("")
 }
