@@ -194,7 +194,7 @@ func toBenchmarkResult(name, payloadSize string, concurrency int, lr loadResult,
 }
 
 // collectPodMetrics queries Prometheus for pod-level signals over the benchmark
-// interval. It expands the window by 15s on each side so the rate(..[30s])
+// interval. It expands the window by 30s on each side so the rate(..[60s])
 // windows have enough data. On any error (or if the collector is disabled) it
 // returns a zero-valued PodMetrics; the benchmark must not fail because
 // Prometheus is unreachable.
@@ -204,7 +204,7 @@ func collectPodMetrics(pc *PrometheusCollector, start, end time.Time) PodMetrics
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	padded := 15 * time.Second
+	padded := 30 * time.Second
 	pod, err := pc.Collect(ctx, start.Add(-padded), end.Add(padded))
 	if err != nil {
 		fmt.Printf("  [prometheus] collection failed: %v\n", err)
@@ -252,6 +252,15 @@ func TestBenchmarkSuite(t *testing.T) {
 		t.Logf("PROMETHEUS_URL not set, falling back to default in-cluster URL")
 	}
 	t.Logf("Prometheus URL: %s", pc.baseURL)
+
+	// Cross-namespace DNS + reachability probe. If Prometheus is unreachable
+	// (wrong service name, network policy, etc.) we log a detailed warning
+	// so CI logs make the root cause obvious, but we do NOT fail the benchmark.
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := pc.Ping(pingCtx); err != nil {
+		t.Logf("WARN Prometheus pre-flight check failed: %v (pod metrics will be zero)", err)
+	}
+	pingCancel()
 
 	report := BenchmarkReport{
 		Timestamp:     time.Now().UTC().Format(time.RFC3339),

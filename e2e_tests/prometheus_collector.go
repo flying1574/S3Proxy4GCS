@@ -70,7 +70,10 @@ type PrometheusCollector struct {
 func NewPrometheusCollector() *PrometheusCollector {
 	baseURL := os.Getenv("PROMETHEUS_URL")
 	if baseURL == "" {
-		baseURL = "http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+		// Actual service name in the cbs-poctest/s3proxy-e2e cluster is
+		// `monitoring-prometheus`, not the upstream default
+		// `monitoring-kube-prometheus-prometheus`.
+		baseURL = "http://monitoring-prometheus.monitoring.svc.cluster.local:9090"
 	}
 	return &PrometheusCollector{
 		baseURL:     strings.TrimRight(baseURL, "/"),
@@ -78,6 +81,38 @@ func NewPrometheusCollector() *PrometheusCollector {
 		podSelector: `namespace="s3proxy-e2e",pod=~"s3proxy-.*"`,
 		enabled:     true,
 	}
+}
+
+// Ping performs a cross-namespace DNS + HTTP reachability check by hitting
+// Prometheus's /-/ready endpoint. On failure it logs a verbose warning so
+// CI logs make the cause (DNS? network policy? wrong service name?) easy
+// to diagnose.
+func (pc *PrometheusCollector) Ping(ctx context.Context) error {
+	if !pc.enabled {
+		return nil
+	}
+	u := pc.baseURL + "/-/ready"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		log.Printf("[prometheus] WARN Ping request build failed for %s: %v", u, err)
+		return err
+	}
+	resp, err := pc.client.Do(req)
+	if err != nil {
+		log.Printf("[prometheus] WARN Ping failed (url=%s): %v "+
+			"(likely DNS resolution issue or cross-namespace network policy; "+
+			"check `kubectl get svc -n monitoring` for the real service name)", u, err)
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[prometheus] WARN Ping non-200 (url=%s, status=%d, body=%q)",
+			u, resp.StatusCode, truncate(string(body), 200))
+		return fmt.Errorf("prometheus /-/ready HTTP %d", resp.StatusCode)
+	}
+	log.Printf("[prometheus] ready at %s", pc.baseURL)
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +195,13 @@ func (pc *PrometheusCollector) QueryRange(ctx context.Context, query string, sta
 			}
 			all = append(all, v)
 		}
+	}
+
+	if len(all) == 0 {
+		log.Printf("[prometheus] WARN range query returned empty: %s "+
+			"(start=%s end=%s step=%s, series=%d) -- "+
+			"check ServiceMonitor is scraping, padding window, and metric exists",
+			shortExpr(query), start.Format(time.RFC3339), end.Format(time.RFC3339), step, len(series))
 	}
 
 	return statsOf(all), nil
@@ -312,21 +354,24 @@ func (pc *PrometheusCollector) Collect(ctx context.Context, start, end time.Time
 	step := 5 * time.Second
 	sel := pc.podSelector
 
+	// Rate window widened from 30s to 60s. ServiceMonitor scrape interval is
+	// 15s, so [60s] guarantees at least ~4 samples per window and yields
+	// much more stable rates over short benchmark intervals.
 	rangeQueries := []struct {
 		target *Stats
 		expr   string
 	}{
 		{
 			&out.NetRxBps,
-			fmt.Sprintf(`sum(rate(container_network_receive_bytes_total{%s}[30s]))`, sel),
+			fmt.Sprintf(`sum(rate(container_network_receive_bytes_total{%s}[60s]))`, sel),
 		},
 		{
 			&out.NetTxBps,
-			fmt.Sprintf(`sum(rate(container_network_transmit_bytes_total{%s}[30s]))`, sel),
+			fmt.Sprintf(`sum(rate(container_network_transmit_bytes_total{%s}[60s]))`, sel),
 		},
 		{
 			&out.CPUCores,
-			fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{%s,container!="POD",container!=""}[30s]))`, sel),
+			fmt.Sprintf(`sum(rate(container_cpu_usage_seconds_total{%s,container!="POD",container!=""}[60s]))`, sel),
 		},
 		{
 			&out.MemoryMB,
@@ -338,7 +383,7 @@ func (pc *PrometheusCollector) Collect(ctx context.Context, start, end time.Time
 		},
 		{
 			&out.HTTPReqRate,
-			`sum(rate(s3proxy_http_requests_total[30s]))`,
+			`sum(rate(s3proxy_http_requests_total[60s]))`,
 		},
 	}
 
