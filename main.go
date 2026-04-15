@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"s3proxy4gcs/config"
+	"s3proxy4gcs/pkg/metrics"
 	"s3proxy4gcs/pkg/translate"
 
 	"cloud.google.com/go/storage"
@@ -29,7 +30,6 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/api/option"
 )
@@ -49,35 +49,8 @@ var gcsURL *url.URL
 // Global SigV4 signer — reused across all requests to avoid per-request allocation.
 var signer = v4.NewSigner()
 
-// Prometheus metrics
-var (
-	httpRequestsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "s3proxy_http_requests_total",
-			Help: "Total number of HTTP requests processed.",
-		},
-		[]string{"method", "handler", "status"},
-	)
-	httpRequestDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "s3proxy_http_request_duration_seconds",
-			Help:    "HTTP request duration in seconds.",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"method", "handler"},
-	)
-	gcsAPIDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "s3proxy_gcs_api_duration_seconds",
-			Help:    "GCS API call duration in seconds.",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"operation"},
-	)
-)
-
 func init() {
-	prometheus.MustRegister(httpRequestsTotal, httpRequestDuration, gcsAPIDuration)
+	// Prometheus metrics are defined and auto-registered in pkg/metrics.
 }
 
 func main() {
@@ -367,6 +340,10 @@ func main() {
 	// Base middlewares
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
+	// metrics.WithMetrics records bytes/size/count/duration for every proxy
+	// request. Placed before observability logging so status codes are captured
+	// consistently.
+	r.Use(metrics.WithMetrics)
 	r.Use(observabilityMiddleware)
 
 	// Concurrency limiter — prevents goroutine/connection exhaustion under burst load.
@@ -410,8 +387,6 @@ func main() {
 		w.Write([]byte(`{"status":"ready","mode":"live"}`))
 	})
 
-	r.Handle("/metrics", promhttp.Handler())
-
 	// Pass-through or intercept handlers
 	r.Route("/", func(r chi.Router) {
 		// Catch-all for S3 requests
@@ -422,9 +397,16 @@ func main() {
 		r.Head("/*", handleS3Request)
 	})
 
+	// Root mux keeps /metrics fully outside the proxy/middleware chain so
+	// Prometheus scrapes are never accounted for as S3 traffic and are not
+	// affected by the throttle or observability middleware.
+	rootMux := http.NewServeMux()
+	rootMux.Handle("/metrics", promhttp.Handler())
+	rootMux.Handle("/", r)
+
 	srv := &http.Server{
 		Addr:    ":" + config.Config.Port,
-		Handler: r,
+		Handler: rootMux,
 
 		// Timeout settings aligned with AWS SDK for Go v2 defaults:
 		// - ReadHeaderTimeout: matches SDK's TLSHandshakeTimeout (10s), prevents Slowloris attacks
@@ -498,10 +480,6 @@ func observabilityMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		statusStr := strconv.Itoa(rec.status)
-		httpRequestsTotal.WithLabelValues(r.Method, handlerLabel, statusStr).Inc()
-		httpRequestDuration.WithLabelValues(r.Method, handlerLabel).Observe(duration.Seconds())
-
 		slog.Info("HTTP request completed",
 			"request_id", reqID,
 			"method", r.Method,
@@ -537,7 +515,7 @@ func timeGCSCall(ctx context.Context, operation string, fn func(ctx context.Cont
 	start := time.Now()
 	err := fn(callCtx)
 	duration := time.Since(start)
-	gcsAPIDuration.WithLabelValues(operation).Observe(duration.Seconds())
+	metrics.GCSAPIDurationSeconds.WithLabelValues(operation).Observe(duration.Seconds())
 	log := reqLogger(ctx)
 	if err != nil {
 		log.Error("GCS API call failed", "operation", operation, "duration_ms", duration.Milliseconds(), "error", err)

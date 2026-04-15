@@ -1,0 +1,41 @@
+# ServiceMonitor for s3proxy Prometheus scraping.
+#
+# Requires kube-prometheus-stack (or any Prometheus Operator install) to be
+# running in the cluster. The stack's Prometheus CR must be configured to
+# select ServiceMonitors across all namespaces, e.g. in its values.yaml:
+#
+#   prometheus:
+#     prometheusSpec:
+#       serviceMonitorSelectorNilUsesHelmValues: false
+#
+# Apply with:
+#   kubectl apply -f k8s/monitoring/s3proxy-servicemonitor.yaml
+#
+# The target Service (k8s/service.yaml) is named `s3proxy` in namespace
+# `s3proxy-e2e`, exposes port `http` (8080), and carries the label
+# `app: s3proxy`. The proxy serves Prometheus metrics on `/metrics`.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: s3proxy
+  namespace: s3proxy-e2e
+  labels:
+    app: s3proxy
+    # `release: monitoring` matches the default kube-prometheus-stack helm
+    # release name used in the deployment guide. Harmless if the Prometheus
+    # CR is configured to match all ServiceMonitors regardless of label.
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - s3proxy-e2e
+  selector:
+    matchLabels:
+      app: s3proxy
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      scheme: http
+      honorLabels: true
