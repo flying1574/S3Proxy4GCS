@@ -52,6 +52,10 @@ on:
         description: "After Phase C, rollback DNS to the A record (true|false)"
         required: false
         default: "true"
+      pressure_duration:
+        description: "Go duration for each PUT/GET pressure loop (e.g. 30s, 1m, 2m)"
+        required: false
+        default: "30s"
 
 env:
   GKE_CLUSTER: s3proxy-e2e
@@ -62,7 +66,7 @@ env:
   # Hard-coded per Clement 2026-04-16:
   DNS_NAME: "s3proxy.lb.local."
   CUTOVER_TARGET: "storage.googleapis.com."
-  PRESSURE_DURATION: "2m"
+  PRESSURE_DURATION: ${{ github.event.inputs.pressure_duration || '30s' }}
   PRESSURE_CONCURRENCY: "2"
   PRESSURE_PAYLOAD_BYTES: "1024"
   POST_CHANGE_SLEEP: "30"
