@@ -66,21 +66,21 @@ jobs:
             -n ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/ingress.yaml
           kubectl set image deployment/s3proxy s3proxy="$IMAGE" -n ${{ env.K8S_NAMESPACE }}
           kubectl rollout status deployment/s3proxy -n ${{ env.K8S_NAMESPACE }} --timeout=120s
 
       - name: Wait for Proxy Health
         id: endpoint
         run: |
-          # Use kubectl port-forward in background
-          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          sleep 5
+          # Wait for internal ingress / ALB DNS endpoint
+          sleep 10
 
           # Health check — use /readyz to ensure GCS connectivity is warm
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+            if curl -sf http://s3proxy.lb.local/readyz > /dev/null 2>&1; then
               echo "Proxy is ready (GCS connectivity verified)!"
-              echo "url=http://localhost:8080" >> "$GITHUB_OUTPUT"
+              echo "url=http://s3proxy.lb.local" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             echo "Waiting for proxy... ($i/30)"
@@ -114,13 +114,12 @@ jobs:
         with:
           install_components: gke-gcloud-auth-plugin
 
-      - name: Get GKE Credentials & Port Forward
+      - name: Get GKE Credentials & Wait for Ingress
         run: |
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
-          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+          for i in $(seq 1 30); do
+            if curl -sf http://s3proxy.lb.local/readyz > /dev/null 2>&1; then
               echo "Proxy is ready!"
               break
             fi
@@ -131,7 +130,7 @@ jobs:
       - name: Run Tests
         working-directory: sdk_tests/go-v2
         env:
-          PROXY_ENDPOINT: http://localhost:8080
+          PROXY_ENDPOINT: http://s3proxy.lb.local
           GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
           GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
@@ -171,13 +170,12 @@ jobs:
         with:
           install_components: gke-gcloud-auth-plugin
 
-      - name: Get GKE Credentials & Port Forward
+      - name: Get GKE Credentials & Wait for Ingress
         run: |
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
-          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+          for i in $(seq 1 30); do
+            if curl -sf http://s3proxy.lb.local/readyz > /dev/null 2>&1; then
               echo "Proxy is ready!"
               break
             fi
@@ -188,7 +186,7 @@ jobs:
       - name: Run Tests
         working-directory: sdk_tests/go-v1
         env:
-          PROXY_ENDPOINT: http://localhost:8080
+          PROXY_ENDPOINT: http://s3proxy.lb.local
           GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
           GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
@@ -227,13 +225,12 @@ jobs:
         with:
           install_components: gke-gcloud-auth-plugin
 
-      - name: Get GKE Credentials & Port Forward
+      - name: Get GKE Credentials & Wait for Ingress
         run: |
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
-          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+          for i in $(seq 1 30); do
+            if curl -sf http://s3proxy.lb.local/readyz > /dev/null 2>&1; then
               echo "Proxy is ready!"
               break
             fi
@@ -246,7 +243,7 @@ jobs:
 
       - name: Run Tests
         env:
-          PROXY_ENDPOINT: http://localhost:8080
+          PROXY_ENDPOINT: http://s3proxy.lb.local
           GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
           GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
@@ -292,13 +289,12 @@ jobs:
         with:
           install_components: gke-gcloud-auth-plugin
 
-      - name: Get GKE Credentials & Port Forward
+      - name: Get GKE Credentials & Wait for Ingress
         run: |
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
-          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+          for i in $(seq 1 30); do
+            if curl -sf http://s3proxy.lb.local/readyz > /dev/null 2>&1; then
               echo "Proxy is ready!"
               break
             fi
@@ -309,7 +305,7 @@ jobs:
       - name: Run Tests
         working-directory: sdk_tests/java-v1
         env:
-          PROXY_ENDPOINT: http://localhost:8080
+          PROXY_ENDPOINT: http://s3proxy.lb.local
           GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
           GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
@@ -352,13 +348,12 @@ jobs:
         with:
           install_components: gke-gcloud-auth-plugin
 
-      - name: Get GKE Credentials & Port Forward
+      - name: Get GKE Credentials & Wait for Ingress
         run: |
           gcloud container clusters get-credentials ${{ env.GKE_CLUSTER }} \
             --region ${{ env.GKE_REGION }} --project cbs-poctest
-          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+          for i in $(seq 1 30); do
+            if curl -sf http://s3proxy.lb.local/readyz > /dev/null 2>&1; then
               echo "Proxy is ready!"
               break
             fi
@@ -369,7 +364,7 @@ jobs:
       - name: Run Tests
         working-directory: sdk_tests/java-v2
         env:
-          PROXY_ENDPOINT: http://localhost:8080
+          PROXY_ENDPOINT: http://s3proxy.lb.local
           GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
           GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
@@ -432,7 +427,7 @@ jobs:
       - name: Port Forward & Run Tests
         working-directory: sdk_tests/cpp
         env:
-          PROXY_ENDPOINT: http://localhost:8080
+          PROXY_ENDPOINT: http://s3proxy.lb.local
           GCS_HMAC_ACCESS: ${{ secrets.GCS_HMAC_ACCESS }}
           GCS_HMAC_SECRET: ${{ secrets.GCS_HMAC_SECRET }}
           TEST_BUCKET: ${{ secrets.TEST_BUCKET }}
@@ -440,9 +435,8 @@ jobs:
           AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
         run: |
           set -o pipefail
-          kubectl port-forward svc/s3proxy 8080:8080 -n ${{ env.K8S_NAMESPACE }} &
-          for i in $(seq 1 20); do
-            if curl -sf http://localhost:8080/readyz > /dev/null 2>&1; then
+          for i in $(seq 1 30); do
+            if curl -sf http://s3proxy.lb.local/readyz > /dev/null 2>&1; then
               echo "Proxy is ready!"
               break
             fi

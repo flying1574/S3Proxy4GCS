@@ -41,8 +41,8 @@ Available Configuration Options:
 You can route all traffic from your S3 client application to the proxy transparently by setting standard proxy environment variables:
 
 ```bash
-export HTTP_PROXY=http://localhost:8080
-export HTTPS_PROXY=http://localhost:8080
+export HTTP_PROXY=http://s3proxy.lb.local
+export HTTPS_PROXY=http://s3proxy.lb.local
 ```
 
 This allows you to use standard S3 endpoints in your code without modifying the initialization logic. However, this affects all HTTP traffic in the process, not just S3 calls.
@@ -177,7 +177,7 @@ The `e2e_tests/` module provides a full acceptance test suite designed to run ag
 
 | Variable | Required | Description |
 |---|---|---|
-| `PROXY_ENDPOINT` | Yes | Proxy URL, e.g. `http://s3proxy.default.svc:8080` or `http://localhost:8080` |
+| `PROXY_ENDPOINT` | Yes | Proxy URL, e.g. `http://s3proxy.lb.local` or `http://s3proxy.default.svc:8080` |
 | `GCS_HMAC_ACCESS` | Yes | GCS HMAC Access Key ID |
 | `GCS_HMAC_SECRET` | Yes | GCS HMAC Secret Access Key |
 | `TEST_BUCKET` | Yes | Target GCS bucket name |
@@ -261,7 +261,7 @@ The proxy Director automatically strips the following headers before SigV4 re-si
 By default, all SDKs must configure **path-style addressing** to work with the proxy. However, if you set `PROXY_BASE_DOMAIN`, the proxy automatically converts virtual-hosted style requests to path-style, allowing SDK clients to use their **default addressing mode** without any configuration.
 
 **Setup:**
-1. Set `PROXY_BASE_DOMAIN` to the proxy's base domain (e.g. `s3proxy.example.com`)
+1. Set `PROXY_BASE_DOMAIN` to the proxy's base domain (e.g. `s3proxy.lb.local`)
 2. Configure wildcard DNS: `*.s3proxy.example.com → proxy IP`
 3. SDK clients can now use `bucket-name.s3proxy.example.com` as the endpoint without configuring path-style
 

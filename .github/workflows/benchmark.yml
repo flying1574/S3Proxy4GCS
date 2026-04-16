@@ -78,36 +78,32 @@ jobs:
             -n ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/ingress.yaml
           kubectl set image deployment/s3proxy s3proxy="$IMAGE" -n ${{ env.K8S_NAMESPACE }}
           kubectl rollout status deployment/s3proxy -n ${{ env.K8S_NAMESPACE }} --timeout=120s
 
-      # ---- In-Cluster Health Check via Job ----
-      - name: Verify S3Proxy Health (In-Cluster)
+      # ---- Internal Ingress Health Check ----
+      - name: Verify S3Proxy Health (Internal Ingress)
         run: |
-          # Apply headless service for direct Pod IP resolution
           kubectl apply -f k8s/benchmark-job.yaml | head -1
 
-          # Quick health check via a one-shot pod
+          # Wait a moment for ingress programming / DNS propagation inside VPC
+          sleep 10
+
           kubectl run health-check --rm -i --restart=Never \
             -n ${{ env.K8S_NAMESPACE }} \
             --image=curlimages/curl:latest \
-            -- curl -sf --max-time 10 http://s3proxy-headless:8080/health
-          echo "S3Proxy is healthy via headless service (direct Pod IP)"
+            -- curl -sf --max-time 10 http://s3proxy.lb.local/health
+          echo "S3Proxy is healthy via internal ingress DNS"
 
       # ---- Network Path Verification ----
-      - name: Verify Network Path (Pod IP, no iptables/kube-proxy)
+      - name: Verify Network Path (Internal ALB / Ingress)
         run: |
-          # Show the S3Proxy Pod IP
-          POD_IP=$(kubectl get pod -l app=s3proxy -n ${{ env.K8S_NAMESPACE }} \
-            -o jsonpath='{.items[0].status.podIP}')
-          echo "S3Proxy Pod IP: $POD_IP"
-
-          # Verify headless service resolves to Pod IP (not ClusterIP)
           kubectl run dns-check --rm -i --restart=Never \
             -n ${{ env.K8S_NAMESPACE }} \
             --image=busybox:1.36 \
-            -- nslookup s3proxy-headless.${{ env.K8S_NAMESPACE }}.svc.cluster.local
-          echo "Headless DNS verified: resolves to Pod IP directly"
+            -- nslookup s3proxy.lb.local
+          echo "Internal DNS verified: s3proxy.lb.local resolves inside VPC"
 
           # Show cluster networking mode
           echo "--- GKE Networking Info ---"
@@ -116,7 +112,7 @@ jobs:
           echo "GKE Dataplane V2 (eBPF): bypasses iptables and kube-proxy entirely"
 
       # ---- Run Benchmark as K8s Job ----
-      - name: Run Benchmark Job (In-Cluster, Pod-to-Pod)
+      - name: Run Benchmark Job (via Internal ALB / Ingress)
         run: |
           BENCH_IMAGE="${{ env.GAR_REGISTRY }}/s3proxy-benchmark:${{ steps.meta.outputs.tag }}"
 
@@ -207,7 +203,7 @@ jobs:
         run: |
           echo "# Performance Benchmark Report (In-Cluster)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Network Path:** Pod-to-Pod via Headless Service (direct Pod IP, no iptables/kube-proxy)" >> $GITHUB_STEP_SUMMARY
+          echo "**Network Path:** Benchmark Pod -> internal ALB / ingress -> ClusterIP service -> S3Proxy Pod" >> $GITHUB_STEP_SUMMARY
           echo "**Dataplane:** GKE Dataplane V2 (eBPF/Cilium)" >> $GITHUB_STEP_SUMMARY
           echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Concurrency:** ${{ inputs.concurrency }} | **Duration:** ${{ inputs.duration_sec }}s per test" >> $GITHUB_STEP_SUMMARY

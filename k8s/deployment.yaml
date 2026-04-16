@@ -73,6 +73,8 @@ spec:
               value: "1000"
             - name: GCS_CALL_TIMEOUT_SEC
               value: "30"
+            - name: PROXY_BASE_DOMAIN
+              value: "s3proxy.lb.local"
             - name: PROXY_AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
