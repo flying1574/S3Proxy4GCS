@@ -72,6 +72,9 @@ for r in json.load(sys.stdin):
 }
 
 TX_FILE="$(mktemp --suffix=.yaml)"
+# gcloud dns transaction start refuses if the file already exists,
+# but mktemp pre-creates it. Remove the placeholder and keep only the path.
+rm -f "$TX_FILE"
 trap 'rm -f "$TX_FILE"' EXIT
 
 log "Current state of $DNS_NAME in zone $DNS_ZONE:"
