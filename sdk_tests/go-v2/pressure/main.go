@@ -38,8 +38,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -55,8 +53,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/aws/smithy-go/middleware"
 )
 
@@ -97,41 +95,14 @@ func percentileMs(sorted []time.Duration, p float64) float64 {
 	return float64(sorted[idx].Microseconds()) / 1000.0
 }
 
-// disableAWSChunked registers a build-phase middleware that:
-//  1. reads the request body fully into a bytes.Reader (seekable),
-//  2. sets x-amz-content-sha256 = hex(sha256(body)),
-//  3. removes aws-chunked / STREAMING-AWS4-HMAC-SHA256-PAYLOAD headers.
-//
-// This forces AWS SigV4 single-chunk signing which GCS XML API accepts.
-func disableAWSChunked(stack *middleware.Stack) error {
-	return stack.Build.Add(middleware.BuildMiddlewareFunc("DisableAWSChunked",
-		func(ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler) (middleware.BuildOutput, middleware.Metadata, error) {
-			req, ok := in.Request.(*smithyhttp.Request)
-			if !ok {
-				return next.HandleBuild(ctx, in)
-			}
-			body := req.GetStream()
-			if body != nil {
-				buf, err := io.ReadAll(body)
-				if err != nil {
-					return middleware.BuildOutput{}, middleware.Metadata{}, err
-				}
-				sum := sha256.Sum256(buf)
-				req.Header.Set("X-Amz-Content-Sha256", hex.EncodeToString(sum[:]))
-				req.Header.Del("Content-Encoding") // strip aws-chunked if set
-				req.Header.Del("X-Amz-Decoded-Content-Length")
-				newReq, err := req.SetStream(bytes.NewReader(buf))
-				if err != nil {
-					return middleware.BuildOutput{}, middleware.Metadata{}, err
-				}
-				newReq.ContentLength = int64(len(buf))
-				in.Request = newReq
-			} else {
-				sum := sha256.Sum256(nil)
-				req.Header.Set("X-Amz-Content-Sha256", hex.EncodeToString(sum[:]))
-			}
-			return next.HandleBuild(ctx, in)
-		}), middleware.After)
+// forceUnsignedPayload swaps SDK v2's default "compute SHA256 payload"
+// middleware for the SDK's own UnsignedPayload variant. The signed
+// request uses x-amz-content-sha256: UNSIGNED-PAYLOAD, so the SigV4
+// canonical request does not depend on body bytes. This is the AWS
+// SDK-supported way to opt out of aws-chunked / streaming payload
+// signing and is accepted by s3proxy and the GCS XML API.
+func forceUnsignedPayload(stack *middleware.Stack) error {
+	return v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware(stack)
 }
 
 func mustEnv(name string) string {
@@ -195,12 +166,14 @@ func main() {
 		o.UsePathStyle = true
 		o.BaseEndpoint = aws.String(*endpoint)
 		o.HTTPClient = httpClient
-		// GCS XML API does not support aws-chunked STREAMING-AWS4-HMAC-SHA256-PAYLOAD.
-		// Disable optional checksum trailers and force single-chunk SigV4 signing:
-		//   x-amz-content-sha256 = sha256(body)   (not STREAMING-...)
+		// Disable aws-chunked / STREAMING-AWS4-HMAC-SHA256-PAYLOAD by using
+		// SDK-native UNSIGNED-PAYLOAD: SigV4 signs headers only, body hash
+		// is the literal string "UNSIGNED-PAYLOAD". No proxy or server that
+		// touches the body will trigger SignatureDoesNotMatch, and s3proxy
+		// + GCS XML API both accept it.
 		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
-		o.APIOptions = append(o.APIOptions, disableAWSChunked)
+		o.APIOptions = append(o.APIOptions, forceUnsignedPayload)
 	})
 
 	payload := make([]byte, *payloadBytes)
