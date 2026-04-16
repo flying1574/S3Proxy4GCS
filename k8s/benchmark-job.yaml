@@ -35,6 +35,9 @@ spec:
         app: benchmark
     spec:
       serviceAccountName: s3proxy
+      # Benchmark pod must run only on benchmark-only node pool.
+      nodeSelector:
+        cloud.google.com/gke-nodepool: benchmark-c4-pool-new
       # Ensure benchmark and s3proxy pods land on different nodes
       affinity:
         podAntiAffinity:

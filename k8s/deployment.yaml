@@ -24,8 +24,18 @@ spec:
         app: s3proxy
     spec:
       serviceAccountName: s3proxy
-      # Ensure s3proxy and benchmark pods land on different nodes
+      # S3Proxy must run only on service node pools, never on benchmark-only pool.
       affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: cloud.google.com/gke-nodepool
+                    operator: In
+                    values:
+                      - c3d-pool
+                      - c4d-pool
+        # Ensure s3proxy and benchmark pods land on different nodes
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
