@@ -35,8 +35,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -53,6 +56,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"github.com/aws/smithy-go/middleware"
 )
 
 type latencyMs struct {
@@ -90,6 +95,43 @@ func percentileMs(sorted []time.Duration, p float64) float64 {
 		idx = len(sorted) - 1
 	}
 	return float64(sorted[idx].Microseconds()) / 1000.0
+}
+
+// disableAWSChunked registers a build-phase middleware that:
+//  1. reads the request body fully into a bytes.Reader (seekable),
+//  2. sets x-amz-content-sha256 = hex(sha256(body)),
+//  3. removes aws-chunked / STREAMING-AWS4-HMAC-SHA256-PAYLOAD headers.
+//
+// This forces AWS SigV4 single-chunk signing which GCS XML API accepts.
+func disableAWSChunked(stack *middleware.Stack) error {
+	return stack.Build.Add(middleware.BuildMiddlewareFunc("DisableAWSChunked",
+		func(ctx context.Context, in middleware.BuildInput, next middleware.BuildHandler) (middleware.BuildOutput, middleware.Metadata, error) {
+			req, ok := in.Request.(*smithyhttp.Request)
+			if !ok {
+				return next.HandleBuild(ctx, in)
+			}
+			body := req.GetStream()
+			if body != nil {
+				buf, err := io.ReadAll(body)
+				if err != nil {
+					return middleware.BuildOutput{}, middleware.Metadata{}, err
+				}
+				sum := sha256.Sum256(buf)
+				req.Header.Set("X-Amz-Content-Sha256", hex.EncodeToString(sum[:]))
+				req.Header.Del("Content-Encoding") // strip aws-chunked if set
+				req.Header.Del("X-Amz-Decoded-Content-Length")
+				newReq, err := req.SetStream(bytes.NewReader(buf))
+				if err != nil {
+					return middleware.BuildOutput{}, middleware.Metadata{}, err
+				}
+				newReq.ContentLength = int64(len(buf))
+				in.Request = newReq
+			} else {
+				sum := sha256.Sum256(nil)
+				req.Header.Set("X-Amz-Content-Sha256", hex.EncodeToString(sum[:]))
+			}
+			return next.HandleBuild(ctx, in)
+		}), middleware.After)
 }
 
 func mustEnv(name string) string {
@@ -153,6 +195,12 @@ func main() {
 		o.UsePathStyle = true
 		o.BaseEndpoint = aws.String(*endpoint)
 		o.HTTPClient = httpClient
+		// GCS XML API does not support aws-chunked STREAMING-AWS4-HMAC-SHA256-PAYLOAD.
+		// Disable optional checksum trailers and force single-chunk SigV4 signing:
+		//   x-amz-content-sha256 = sha256(body)   (not STREAMING-...)
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+		o.APIOptions = append(o.APIOptions, disableAWSChunked)
 	})
 
 	payload := make([]byte, *payloadBytes)
@@ -168,9 +216,10 @@ func main() {
 	if *op == "GET" {
 		seedKey = fmt.Sprintf("%spressure-seed-%s-%s-%d", *prefix, *sdkLabel, *phase, time.Now().UnixNano())
 		if _, err := client.PutObject(context.Background(), &s3.PutObjectInput{
-			Bucket: aws.String(*bucket),
-			Key:    aws.String(seedKey),
-			Body:   strings.NewReader(string(payload)),
+			Bucket:        aws.String(*bucket),
+			Key:           aws.String(seedKey),
+			Body:          bytes.NewReader(payload),
+			ContentLength: aws.Int64(int64(len(payload))),
 		}); err != nil {
 			log.Fatalf("seed put: %v", err)
 		}
@@ -198,9 +247,10 @@ func main() {
 		case "PUT":
 			key := fmt.Sprintf("%spressure-put-%s-%s-%d", *prefix, *sdkLabel, *phase, time.Now().UnixNano())
 			_, err := client.PutObject(context.Background(), &s3.PutObjectInput{
-				Bucket: aws.String(*bucket),
-				Key:    aws.String(key),
-				Body:   strings.NewReader(string(payload)),
+				Bucket:        aws.String(*bucket),
+				Key:           aws.String(key),
+				Body:          bytes.NewReader(payload),
+				ContentLength: aws.Int64(int64(len(payload))),
 			})
 			if err == nil {
 				go func(k string) {
