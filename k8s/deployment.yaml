@@ -73,6 +73,22 @@ spec:
                 secretKeyRef:
                   name: s3proxy-credentials
                   key: PROXY_AWS_SECRET_ACCESS_KEY
+            # ---- Request Log System ----
+            - name: REQUEST_LOG_ENABLED
+              value: "true"
+            - name: REQUEST_LOG_PATH
+              value: "/var/log/s3proxy/req_%Y%M%D.csv"
+            - name: REQUEST_LOG_MAX_SIZE_MB
+              value: "512"
+            - name: REQUEST_LOG_MAX_BACKUP
+              value: "5"
+            - name: REQUEST_LOG_CHAN_BUF
+              value: "10240"
+            - name: REQUEST_LOG_KEEP_DAYS
+              value: "7"
+          volumeMounts:
+            - name: log-volume
+              mountPath: /var/log/s3proxy
           resources:
             # Guaranteed QoS: requests == limits to avoid CPU throttling
             requests:
@@ -93,3 +109,6 @@ spec:
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 15
+      volumes:
+        - name: log-volume
+          emptyDir: {}
