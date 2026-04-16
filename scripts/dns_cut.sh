@@ -63,12 +63,13 @@ if [[ "$MODE" == "describe" ]]; then
 fi
 
 # Parse current record sets into TSV: type<TAB>space-separated-rrdata<TAB>ttl
+# Using gcloud --format=csv avoids shell/python quoting headaches and also
+# avoids GitHub Actions $-interpolation poisoning the inline script.
 current_rrsets_tsv() {
-  describe_current_json | python3 -c '
-import json, sys
-for r in json.load(sys.stdin):
-    print(f"{r.get(\"type\",\"\")}\t{\" \".join(r.get(\"rrdatas\",[]))}\t{r.get(\"ttl\",\"\")}")
-'
+  gcloud dns record-sets list \
+    --project="$DNS_PROJECT" --zone="$DNS_ZONE" \
+    --name="$DNS_NAME" \
+    --format='csv[no-heading,separator="	"](type,rrdatas.list(separator=" "),ttl)'
 }
 
 TX_FILE="$(mktemp --suffix=.yaml)"
