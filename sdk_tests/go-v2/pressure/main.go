@@ -266,10 +266,13 @@ func main() {
 	}
 
 	var (
-		mu        sync.Mutex
-		latencies []time.Duration
-		total     atomic.Int64
-		errs      atomic.Int64
+		mu          sync.Mutex
+		latencies   []time.Duration
+		total       atomic.Int64
+		errs        atomic.Int64
+		firstErrMu  sync.Mutex
+		firstErrStr string
+		errSamples  atomic.Int64
 	)
 	startWall := time.Now().UTC()
 	t0 := time.Now()
@@ -287,6 +290,14 @@ func main() {
 				total.Add(1)
 				if err != nil {
 					errs.Add(1)
+					if errSamples.Add(1) <= 5 {
+						log.Printf("err sample: %v", err)
+					}
+					firstErrMu.Lock()
+					if firstErrStr == "" {
+						firstErrStr = err.Error()
+					}
+					firstErrMu.Unlock()
 				} else {
 					local = append(local, time.Since(start))
 				}
