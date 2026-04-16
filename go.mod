@@ -7,6 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/go-chi/chi/v5 v5.0.12
 	github.com/joho/godotenv v1.5.1
+	github.com/maczam/ymlog v0.2.0
 	github.com/prometheus/client_golang v1.23.2
 	google.golang.org/api v0.271.0
 )

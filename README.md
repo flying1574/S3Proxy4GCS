@@ -125,6 +125,7 @@ graph TB
 
 ## Features
 
+- **Multi-Object Delete**: Fully supports bulk `DeleteObjects` using standard S3 XML payloads routed directly to GCS's native XML API via HMAC re-signing.
 - **Lifecycle Intercept**: Translates S3 XML Lifecycle Configuration to GCS JSON.
 - **Real GCS Forwarding**: Submits translated JSON to GCS via official GCS Go SDK.
 - **Structured JSON Logging**: Native `log/slog` for modern cloud observability (Parsable JSON lines). Toggle `DEBUG_LOGGING=true` for verbose output.

@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,6 +33,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/api/option"
+
+	"s3proxy4gcs/pkg/reqlog"
 )
 
 // maxControlPlaneBodySize is the maximum allowed request body size for
@@ -56,6 +59,18 @@ func init() {
 func main() {
 	// Initialize configuration
 	config.LoadConfig()
+
+	// Initialize request data logger (SOH-delimited CSV via ymlog)
+	if config.Config.ReqLogEnabled {
+		reqlog.Init(
+			config.Config.ReqLogPath,
+			config.Config.ReqLogMaxSizeMB,
+			config.Config.ReqLogMaxBackup,
+			config.Config.ReqLogChanBuf,
+		)
+		logDir := filepath.Dir(strings.ReplaceAll(config.Config.ReqLogPath, "%Y%M%D", "placeholder"))
+		reqlog.StartCleanup(logDir, config.Config.ReqLogKeepDays)
+	}
 
 	// Initialize Structured JSON Logger (slog)
 	var level slog.Level = slog.LevelInfo
@@ -326,6 +341,20 @@ func main() {
 			)
 		}
 
+		// Read and log XML response if requested for version interop
+		if strings.Contains(resp.Request.URL.RawQuery, "versions") {
+			if bodyBytes, err := io.ReadAll(resp.Body); err == nil {
+				slog.Debug("XML Response Body for ListObjectVersions", "xml", string(bodyBytes))
+				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			}
+		}
+
+		// 3. Versioning Interop (Ingress)
+		if gen := resp.Header.Get("x-goog-generation"); gen != "" {
+			resp.Header.Set("x-amz-version-id", gen)
+			slog.Info("Mapped x-goog-generation to x-amz-version-id", "generation", gen)
+		}
+
 		return nil
 	}
 
@@ -339,6 +368,10 @@ func main() {
 
 	// Base middlewares
 	r.Use(middleware.RequestID)
+	if config.Config.ReqLogEnabled {
+		r.Use(reqlog.Middleware(reqlog.Default))
+	}
+	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	// metrics.WithMetrics records bytes/size/count/duration for every proxy
 	// request. Placed before observability logging so status codes are captured

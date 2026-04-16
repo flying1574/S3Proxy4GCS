@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 func TestStandardDataPlaneWithAWSSDK(t *testing.T) {
@@ -197,5 +198,74 @@ func TestMultipartUploadWithAWSSDK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AbortMultipartUpload failed: %v", err)
 	}
-	t.Logf("AbortMultipartUpload succeeded!")
+}
+
+func TestMultiObjectDeleteWithAWSSDK(t *testing.T) {
+	dialer := &net.Dialer{}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if strings.HasPrefix(addr, "storage.googleapis.com") {
+				return dialer.DialContext(ctx, network, "localhost:8081")
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}
+
+	creds := aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+		return aws.Credentials{
+			AccessKeyID:     getAWSAccessKey(),
+			SecretAccessKey: getAWSSecretKey(),
+			Source:          "test-env",
+		}, nil
+	})
+
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithCredentialsProvider(creds),
+		config.WithRegion("us-east-1"),
+	)
+	if err != nil {
+		t.Fatalf("Failed to load AWS config: %v", err)
+	}
+
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.UsePathStyle = true
+		o.HTTPClient = &http.Client{Transport: transport}
+		o.BaseEndpoint = aws.String("http://storage.googleapis.com")
+	})
+
+	bucketName := getTestBucket()
+	key1 := getTestPrefix() + "bulk-delete-item-1"
+	key2 := getTestPrefix() + "bulk-delete-item-2"
+
+	// 1. Create objects
+	t.Logf("Creating objects for bulk deletion...")
+	_, _ = client.PutObject(context.TODO(), &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key1),
+		Body:   strings.NewReader("Item 1"),
+	})
+	_, _ = client.PutObject(context.TODO(), &s3.PutObjectInput{
+		Bucket: aws.String(bucketName),
+		Key:    aws.String(key2),
+		Body:   strings.NewReader("Item 2"),
+	})
+
+	// 2. Perform DeleteObjects
+	t.Logf("Executing DeleteObjects on %s and %s...", key1, key2)
+	resp, err := client.DeleteObjects(context.TODO(), &s3.DeleteObjectsInput{
+		Bucket: aws.String(bucketName),
+		Delete: &types.Delete{
+			Objects: []types.ObjectIdentifier{
+				{Key: aws.String(key1)},
+				{Key: aws.String(key2)},
+			},
+			Quiet: aws.Bool(false),
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("DeleteObjects failed: %v", err)
+	}
+
+	t.Logf("DeleteObjects succeeded! Deleted count: %d", len(resp.Deleted))
 }

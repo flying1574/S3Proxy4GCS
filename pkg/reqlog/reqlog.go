@@ -1,0 +1,279 @@
+package reqlog
+
+import (
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	chiMW "github.com/go-chi/chi/v5/middleware"
+	"github.com/maczam/ymlog"
+)
+
+// Default is the package-level singleton logger, initialized by Init().
+var Default *ymlog.Logger
+
+// Init initializes the ymlog.Logger with a FileLoggerWriter.
+// filePath supports %Y%M%D date patterns (e.g. "./logs/req_%Y%M%D.csv").
+// maxSizeMB is the per-file size limit in megabytes (0 = no limit).
+// Call once from main() before the HTTP server starts.
+func Init(filePath string, maxSizeMB, maxBackup, chanBuf int) {
+	Default = ymlog.NewLogger(&ymlog.FileLoggerWriter{
+		FileName:         filePath,
+		RotateDaily:      true,
+		RotateSize:       maxSizeMB > 0,
+		MaxSize:          maxSizeMB,
+		MaxBackup:        maxBackup,
+		ChanBufferLength: chanBuf,
+		WriteFileBuffer:  5,
+	})
+}
+
+// Record holds the fields logged for each request.
+type Record struct {
+	TimestampMs int64
+	RequestID   string
+	SourceIP    string
+	HTTPMethod  string
+	APIMethod   string
+	Bucket      string
+	StatusCode  int
+	DurationMs  int64
+}
+
+// ToCSVLine serializes the record as a SOH-delimited (\u0001) line.
+func (rec Record) ToCSVLine() string {
+	return strings.Join([]string{
+		strconv.FormatInt(rec.TimestampMs, 10),
+		rec.RequestID,
+		rec.SourceIP,
+		rec.HTTPMethod,
+		rec.APIMethod,
+		rec.Bucket,
+		strconv.Itoa(rec.StatusCode),
+		strconv.FormatInt(rec.DurationMs, 10),
+	}, "\u0001")
+}
+
+// statusRecorder wraps http.ResponseWriter to capture the response status code.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sr *statusRecorder) WriteHeader(code int) {
+	sr.status = code
+	sr.ResponseWriter.WriteHeader(code)
+}
+
+// Middleware returns a Chi-compatible middleware that logs each request to logger
+// in SOH-delimited CSV format. It requires middleware.RequestID to be applied first.
+func Middleware(logger *ymlog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+			next.ServeHTTP(rec, r)
+
+			entry := Record{
+				TimestampMs: start.UnixMilli(),
+				RequestID:   chiMW.GetReqID(r.Context()),
+				SourceIP:    ExtractSourceIP(r),
+				HTTPMethod:  r.Method,
+				APIMethod:   InferAPIMethod(r),
+				Bucket:      ExtractBucket(r),
+				StatusCode:  rec.status,
+				DurationMs:  time.Since(start).Milliseconds(),
+			}
+			logger.InfoString(entry.ToCSVLine())
+		})
+	}
+}
+
+// ExtractSourceIP returns the client IP from X-Forwarded-For (first value),
+// then X-Real-Ip, then r.RemoteAddr.
+func ExtractSourceIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if idx := strings.IndexByte(xff, ','); idx >= 0 {
+			return strings.TrimSpace(xff[:idx])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if xri := r.Header.Get("X-Real-Ip"); xri != "" {
+		return strings.TrimSpace(xri)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// InferAPIMethod maps the HTTP method + path + query parameters to an S3 operation name.
+func InferAPIMethod(r *http.Request) string {
+	method := r.Method
+	path := r.URL.Path
+	q := r.URL.Query()
+
+	hasQuery := func(key string) bool {
+		_, ok := q[key]
+		return ok
+	}
+
+	// Root path = ListBuckets
+	if path == "/" {
+		if method == http.MethodGet {
+			return "ListBuckets"
+		}
+		return "Unknown"
+	}
+
+	// Control-plane query-param operations
+	if hasQuery("lifecycle") {
+		switch method {
+		case http.MethodGet:
+			return "GetBucketLifecycle"
+		case http.MethodPut:
+			return "PutBucketLifecycle"
+		case http.MethodDelete:
+			return "DeleteBucketLifecycle"
+		}
+	}
+	if hasQuery("cors") {
+		switch method {
+		case http.MethodGet:
+			return "GetBucketCors"
+		case http.MethodPut:
+			return "PutBucketCors"
+		case http.MethodDelete:
+			return "DeleteBucketCors"
+		}
+	}
+	if hasQuery("acl") {
+		switch method {
+		case http.MethodGet:
+			return "GetObjectAcl"
+		case http.MethodPut:
+			return "PutObjectAcl"
+		}
+	}
+	if hasQuery("versioning") {
+		switch method {
+		case http.MethodGet:
+			return "GetBucketVersioning"
+		case http.MethodPut:
+			return "PutBucketVersioning"
+		}
+	}
+	if hasQuery("tagging") {
+		switch method {
+		case http.MethodGet:
+			return "GetTagging"
+		case http.MethodPut:
+			return "PutTagging"
+		case http.MethodDelete:
+			return "DeleteTagging"
+		}
+	}
+	if hasQuery("delete") {
+		return "DeleteObjects"
+	}
+
+	// Determine bucket and key from path
+	trimmed := strings.TrimPrefix(path, "/")
+	parts := strings.SplitN(trimmed, "/", 2)
+	hasBucket := len(parts) >= 1 && parts[0] != ""
+	hasKey := len(parts) == 2 && parts[1] != ""
+
+	if hasBucket && !hasKey {
+		switch method {
+		case http.MethodGet:
+			return "ListObjects"
+		case http.MethodHead:
+			return "HeadBucket"
+		case http.MethodPut:
+			return "CreateBucket"
+		case http.MethodDelete:
+			return "DeleteBucket"
+		}
+	}
+	if hasBucket && hasKey {
+		switch method {
+		case http.MethodGet:
+			return "GetObject"
+		case http.MethodPut:
+			return "PutObject"
+		case http.MethodDelete:
+			return "DeleteObject"
+		case http.MethodHead:
+			return "HeadObject"
+		}
+	}
+
+	return "Unknown"
+}
+
+// ExtractBucket returns the bucket name from the request.
+// Supports path-style (/bucket/key) only; virtual-hosted style is not applicable
+// in this proxy since all requests arrive at a single host.
+func ExtractBucket(r *http.Request) string {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/")
+	if trimmed == "" {
+		return ""
+	}
+	parts := strings.SplitN(trimmed, "/", 2)
+	return parts[0]
+}
+
+// StartCleanup launches a background goroutine that runs once daily at 00:05,
+// deleting req_YYYYMMDD.csv files (including rotation suffixes .1, .2 …)
+// whose date is older than keepDays days ago.
+func StartCleanup(dir string, keepDays int) {
+	go func() {
+		for {
+			now := time.Now()
+			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 5, 0, 0, now.Location())
+			time.Sleep(time.Until(next))
+			cleanOldLogs(dir, keepDays)
+		}
+	}()
+}
+
+var logFileRe = regexp.MustCompile(`^req_(\d{8})\.csv(\.\d+)?$`)
+
+func cleanOldLogs(dir string, keepDays int) {
+	cutoff := time.Now().AddDate(0, 0, -keepDays)
+
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		slog.Error("reqlog cleanup: read dir failed", "dir", dir, "error", err)
+		return
+	}
+	for _, f := range files {
+		if f.IsDir() {
+			continue
+		}
+		m := logFileRe.FindStringSubmatch(f.Name())
+		if len(m) < 2 {
+			continue
+		}
+		fileDate, err := time.Parse("20060102", m[1])
+		if err != nil {
+			continue
+		}
+		if !fileDate.After(cutoff) {
+			fullPath := filepath.Join(dir, f.Name())
+			if err := os.Remove(fullPath); err != nil {
+				slog.Error("reqlog cleanup: remove failed", "path", fullPath, "error", err)
+			} else {
+				slog.Info("reqlog cleanup: removed", "path", fullPath)
+			}
+		}
+	}
+}

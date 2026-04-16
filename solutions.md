@@ -34,10 +34,10 @@ Choosing between a GLB Extension and a Cloud Run proxy depends on whether the fe
 - **Transparent Tag Translation**: Rewriting standard S3 `x-amz-tagging` upload headers into GCS custom metadata `x-goog-meta-s3tag-` instantly.
 
 **🟡 Difficult for GLB Extensions (Requires Body Translation & Re-signing)**
+- **DeleteObjects (Multi-Object Delete)**: Fully supported by passing the HMAC v4 re-signed payload directly to GCS's native XML API, requiring no heavy custom fan-out translation in the proxy.
 - **XML Parsing (Lifecycle, CORS, Logging)**: Modifying the XML body invalidates the original AWS v4 signature. Generating a new GCP HMAC signature within a load balancer extension is heavily resource-intensive and risks hitting execution timeouts. Best routed to a dedicated Cloud Run instance.
 
 **🔴 Unsuitable for GLB Extensions (Stateful/Orchestration)**
-- **DeleteObjects (Fan-out)**: Cannot fan-out single requests into up to 1,000 separate GCS API calls and aggregate responses.
 - **S3 `?tagging` API**: The read-modify-write cycle (GET metadata -> merge -> PUT) is too slow for load balancer inline validation.
 - **Upload Part Copy**: Exceeds memory/streaming limits due to required buffering.
 
@@ -73,17 +73,17 @@ These features intercept high-frequency data path operations or require heavy ba
 
 #### 3. DeleteObjects (Multi-Object Delete) - **[Implemented ✅]**
 **Issue**: Previously believed GCS S3-compatible API did not support bulk `DeleteObjects`.
-**Resolution**: GCS XML API natively supports `POST /?delete` for bulk deletion of up to 1000 objects per request. The proxy transparently passes through the request with SigV4 re-signing. No fan-out or special handling required.
+**Resolution**: GCS XML API natively supports `POST /?delete` for bulk deletion of up to 1000 objects per request. The proxy transparently passes through the request with SigV4 re-signing, stripping non-compliant headers before forwarding. No fan-out or special handling required.
 
 #### 4. UploadPartCopy - **[Native ✅]**
 **Issue**: Previously believed to require large memory buffers for proxy-side implementation.
 **Resolution**: GCS S3-compatible API natively supports `UploadPartCopy` (`PUT` with `x-amz-copy-source` + `uploadId` + `partNumber`). The proxy transparently passes through with SigV4 re-signing. No buffering or special handling required.
 
-#### 5. Inventory Data Manifests - **[Deferred]**
+#### 4. Inventory Data Manifests - **[Deferred]**
 **Issue**: Automations expect specific S3 Inventory output formats.
 **Proxy Impact**: Requires External Stateful ETL Worker.
 
-#### 6. Flexible Checksums (aws-chunked unwrapping) - **[Deferred]**
+#### 5. Flexible Checksums (aws-chunked unwrapping) - **[Deferred]**
 **Issue**: Modern SDKs use `aws-chunked` framing for checksum trailers, unsupported by GCS.
 **Proxy Impact**: Extreme Memory/Bandwidth Overhead. Unwrapping requires heavy stream parsing and may limit high-speed transparent data-plane throughput.
 **Recommendation**: Use client-side `AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED` or use standard `Content-MD5` headers for integrity.

@@ -15,6 +15,7 @@ These features pass through the proxy transparently to GCS. The proxy preserves 
 -   **`DeleteObject`**
 -   **`DeleteObjects`** (Multi-Object Delete, up to 1000 objects per request)
 -   **`ListObjectsV2`**
+-   **`DeleteObjects`** (Multi-Object Delete)
 
 ### 2. Multipart Uploads
 -   **`CreateMultipartUpload`**

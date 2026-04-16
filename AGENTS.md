@@ -18,6 +18,7 @@ The goal is to serve as a transparent middleware for S3 protocols to translate u
 8.  **Standard S3 Errors**: Use the `writeS3Error` helper to respond with standard AWS S3 XML error formats. Do not use plain text `http.Error` as SDK clients expect XML.
 9.  **Structured JSON Logging**: When logging, use standard Go 1.21's `log/slog` module instead of standard `log.Printf`. Use semantic levels (`Info`, `Error`, `Debug`) and use keyword arguments (e.g., `slog.Info("msg", "key", val)`) to ensure parsed compatibility with Cloud Logging.
 10. **Guaranteed QoS for K8s**: All K8s deployments must set `requests == limits` (Guaranteed QoS class) for both CPU and memory. Burstable QoS causes CFS throttling under node contention, resulting in throughput loss. Use Pod anti-affinity to separate proxy and client/benchmark Pods onto different nodes.
+11. **Multi-Object Delete Support**: Bulk deletion via `DeleteObjects` (`POST /?delete`) is natively supported by GCS's XML API. The proxy automatically strips non-compliant client headers (e.g., `Accept-Encoding: identity`), re-signs the request using HMAC v4, and forwards the payload directly to GCS to process bulk deletes without requiring custom fan-out translation logic.
 
 ## Environment Layout
 
