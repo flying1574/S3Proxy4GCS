@@ -11,7 +11,7 @@
 //	-op           get|put           (required)
 //	-duration     2m                (default; Go duration syntax)
 //	-concurrency  2                 (default)
-//	-endpoint     http://s3proxy.lb.local      (default)
+//	-endpoint     http://s3proxy.lb.local:8080 (default)
 //	-bucket       <required>
 //	-prefix       dns-cut-<runid>/  (object key prefix)
 //	-payload-bytes 1024             (default)
@@ -30,7 +30,7 @@
 //	  "latency_ms": {"p50":..,"p95":..,"p99":..,"max":..,"avg":..},
 //	  "concurrency": 2, "payload_bytes": 1024,
 //	  "started_at": "...", "ended_at": "...",
-//	  "endpoint": "http://s3proxy.lb.local"
+//	  "endpoint": "http://s3proxy.lb.local:8080"
 //	}
 package main
 
@@ -53,9 +53,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/smithy-go/middleware"
 )
 
 type latencyMs struct {
@@ -95,16 +93,6 @@ func percentileMs(sorted []time.Duration, p float64) float64 {
 	return float64(sorted[idx].Microseconds()) / 1000.0
 }
 
-// forceUnsignedPayload swaps SDK v2's default "compute SHA256 payload"
-// middleware for the SDK's own UnsignedPayload variant. The signed
-// request uses x-amz-content-sha256: UNSIGNED-PAYLOAD, so the SigV4
-// canonical request does not depend on body bytes. This is the AWS
-// SDK-supported way to opt out of aws-chunked / streaming payload
-// signing and is accepted by s3proxy and the GCS XML API.
-func forceUnsignedPayload(stack *middleware.Stack) error {
-	return v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware(stack)
-}
-
 func mustEnv(name string) string {
 	v := os.Getenv(name)
 	if v == "" {
@@ -117,7 +105,7 @@ func main() {
 	op := flag.String("op", "", "get|put (required)")
 	durationStr := flag.String("duration", "2m", "wall-clock duration (Go duration syntax)")
 	concurrency := flag.Int("concurrency", 2, "concurrent workers")
-	endpoint := flag.String("endpoint", "http://s3proxy.lb.local", "S3 endpoint URL")
+	endpoint := flag.String("endpoint", "http://s3proxy.lb.local:8080", "S3 endpoint URL")
 	bucket := flag.String("bucket", "", "S3 bucket (required)")
 	prefix := flag.String("prefix", "dns-cut/", "object key prefix")
 	payloadBytes := flag.Int("payload-bytes", 1024, "request body size for PUT / seed object size for GET")
@@ -166,14 +154,6 @@ func main() {
 		o.UsePathStyle = true
 		o.BaseEndpoint = aws.String(*endpoint)
 		o.HTTPClient = httpClient
-		// Disable aws-chunked / STREAMING-AWS4-HMAC-SHA256-PAYLOAD by using
-		// SDK-native UNSIGNED-PAYLOAD: SigV4 signs headers only, body hash
-		// is the literal string "UNSIGNED-PAYLOAD". No proxy or server that
-		// touches the body will trigger SignatureDoesNotMatch, and s3proxy
-		// + GCS XML API both accept it.
-		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
-		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
-		o.APIOptions = append(o.APIOptions, forceUnsignedPayload)
 	})
 
 	payload := make([]byte, *payloadBytes)
