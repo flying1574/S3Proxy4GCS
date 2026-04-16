@@ -4,6 +4,7 @@ metadata:
   name: s3proxy-internal
   namespace: s3proxy-e2e
   annotations:
+    kubernetes.io/ingress.regional-static-ip-name: "s3proxy-regional-internal-reserved"
     kubernetes.io/ingress.class: gce-internal
     kubernetes.io/ingress.allow-http: "true"
     # Internal ALB address is auto-assigned for now.

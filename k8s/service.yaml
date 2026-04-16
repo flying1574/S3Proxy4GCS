@@ -5,6 +5,8 @@ metadata:
   namespace: s3proxy-e2e
   labels:
     app: s3proxy
+  annotations:
+    cloud.google.com/backend-config: '{"default":"s3proxy-backendconfig"}'
 spec:
   type: ClusterIP
   selector:
