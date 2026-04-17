@@ -19,9 +19,10 @@ name: multi-sdk-dns-cutting-tests
 #   Phase D  Report.            Aggregate Phase A vs C JSONs into a Markdown
 #              report (GitHub step summary) + JSON artifact.
 #
-# Pressure jobs run inside the cluster as K8s Jobs, so the DNS resolution
-# path is the real one — Phase A hits internal ALB, Phase C hits the
-# CNAME -> GCS — without any runner-local /etc/hosts hacks.
+# Pressure jobs run inside the cluster as K8s Jobs. Phase A uses
+# -endpoint=http://s3proxy.lb.local:8080; Phase C uses
+# -endpoint=http://s3proxy.lb.local:80 (post-cut; not 8080). DNS resolution
+# is real — no runner /etc/hosts hacks.
 #
 # This workflow does NOT build/deploy s3proxy. It assumes namespace
 # `s3proxy-e2e` is already healthy (same assumption as benchmark.yml).

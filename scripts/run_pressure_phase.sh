@@ -15,6 +15,11 @@
 #   CONCURRENCY    e.g. "2"
 #   PAYLOAD_BYTES  e.g. "1024"
 #
+# Endpoint (injected as __S3_ENDPOINT__):
+#   Phase A — http://s3proxy.lb.local:8080
+#   Phase C — http://s3proxy.lb.local:80  (not 8080; post DNS cut)
+# Override: PRESSURE_ENDPOINT_PHASE_A / PRESSURE_ENDPOINT_PHASE_C
+#
 # Assumes kubectl is already authed against the target cluster.
 set -euo pipefail
 
@@ -24,6 +29,15 @@ set -euo pipefail
 : "${DURATION:?DURATION required}"
 : "${CONCURRENCY:?CONCURRENCY required}"
 : "${PAYLOAD_BYTES:?PAYLOAD_BYTES required}"
+
+case "${PHASE}" in
+  A) S3_ENDPOINT="${PRESSURE_ENDPOINT_PHASE_A:-http://s3proxy.lb.local:8080}" ;;
+  C) S3_ENDPOINT="${PRESSURE_ENDPOINT_PHASE_C:-http://s3proxy.lb.local:80}" ;;
+  *)
+    echo "PHASE must be A or C, got: ${PHASE}" >&2
+    exit 1
+    ;;
+esac
 
 NAMESPACE="${K8S_NAMESPACE:-s3proxy-e2e}"
 TEMPLATE="${TEMPLATE:-k8s/pressure-gov2-job.yaml}"
@@ -43,6 +57,7 @@ render_manifest() {
     -e "s|__DURATION__|${DURATION}|g" \
     -e "s|__CONCURRENCY__|${CONCURRENCY}|g" \
     -e "s|__PAYLOAD_BYTES__|${PAYLOAD_BYTES}|g" \
+    -e "s|__S3_ENDPOINT__|${S3_ENDPOINT//|/\\|}|g" \
     -e "s|__TEST_PREFIX__|${RUN_PREFIX}-phase${PHASE_LOWER}/|g" \
     "$TEMPLATE" > "$out_path"
 }
@@ -104,6 +119,7 @@ run_one() {
 
   echo "=================================================================="
   echo "[Phase ${PHASE}] op=${op} job=${job_name} image=${IMAGE}"
+  echo "[Phase ${PHASE}] endpoint=${S3_ENDPOINT}"
   echo "=================================================================="
 
   kubectl -n "$NAMESPACE" delete job "$job_name" --ignore-not-found

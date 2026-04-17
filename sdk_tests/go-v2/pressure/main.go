@@ -3,15 +3,14 @@
 // Single-purpose main: drive AWS SDK Go V2 against the s3proxy endpoint for
 // a fixed wall-clock duration with N concurrent workers, then write a JSON
 // report. Designed to run inside a K8s Job so it sees the cluster-internal
-// DNS view of `s3proxy.lb.local` (internal ALB in Phase A, CNAME->GCS in
-// Phase C).
+// DNS view of `s3proxy.lb.local`: Phase A uses :8080, Phase C :80 (set by Job).
 //
 // Flags:
 //
 //	-op           get|put           (required)
 //	-duration     2m                (default; Go duration syntax)
 //	-concurrency  2                 (default)
-//	-endpoint     http://s3proxy.lb.local:8080 (default)
+//	-endpoint     http://s3proxy.lb.local:8080 (default; Phase C uses :80)
 //	-bucket       <required>
 //	-prefix       dns-cut-<runid>/  (object key prefix)
 //	-payload-bytes 1024             (default)

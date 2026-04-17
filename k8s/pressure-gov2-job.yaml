@@ -6,8 +6,8 @@
 #
 # The workflow substitutes __TOKEN__ placeholders via `sed` before apply.
 # Running inside the cluster is important: pods resolve `s3proxy.lb.local`
-# via the cluster-internal DNS view, so Phase A hits internal ALB and
-# Phase C hits CNAME -> storage.googleapis.com without any hosts hacks.
+# via the cluster-internal DNS view. Phase A uses :8080 (ALB -> proxy);
+# Phase C uses :80 (post-cut path; CNAME -> GCS). See __S3_ENDPOINT__.
 #
 # Required substitutions:
 #   __JOB_NAME__        unique per Job (<=52 chars)
@@ -18,6 +18,7 @@
 #   __CONCURRENCY__     integer, e.g. "2"
 #   __PAYLOAD_BYTES__   integer, e.g. "1024"
 #   __TEST_PREFIX__     key prefix, e.g. "dns-cut-<run_id>/"
+#   __S3_ENDPOINT__     Phase A: http://s3proxy.lb.local:8080 | Phase C: http://s3proxy.lb.local:80
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -60,7 +61,7 @@ spec:
             - "-duration=__DURATION__"
             - "-concurrency=__CONCURRENCY__"
             - "-payload-bytes=__PAYLOAD_BYTES__"
-            - "-endpoint=http://s3proxy.lb.local:8080"
+            - "-endpoint=__S3_ENDPOINT__"
             - "-bucket=$(TEST_BUCKET)"
             - "-prefix=__TEST_PREFIX__"
             - "-sdk=go-v2"
